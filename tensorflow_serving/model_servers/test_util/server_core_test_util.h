@@ -39,8 +39,6 @@ class ServerCoreTest : public ::testing::TestWithParam<std::tuple<int, bool>> {
  public:
   // The parameter of this test.
   enum TestType {
-    // SessionBundle is used on export.
-    SESSION_BUNDLE,
     // SavedModelBundle is used on export.
     SAVED_MODEL_BACKWARD_COMPATIBILITY,
     // SavedModelBundle is used on native Saved Model.
@@ -51,8 +49,6 @@ class ServerCoreTest : public ::testing::TestWithParam<std::tuple<int, bool>> {
 
   static string GetNameOfTestType(int test_type) {
     switch (static_cast<TestType>(test_type)) {
-      case SESSION_BUNDLE:
-        return "SESSION_BUNDLE";
       case SAVED_MODEL_BACKWARD_COMPATIBILITY:
         return "SAVED_MODEL_BACKWARD_COMPATIBILITY";
       case SAVED_MODEL:
@@ -61,6 +57,9 @@ class ServerCoreTest : public ::testing::TestWithParam<std::tuple<int, bool>> {
         return "unknown";
     }
   }
+
+  // Creates some reasonable default ServerCore options for tests.
+  static ServerCore::Options GetDefaultOptions();
 
  protected:
   // Returns ModelServerConfig that contains test model for the fake platform.
@@ -73,9 +72,6 @@ class ServerCoreTest : public ::testing::TestWithParam<std::tuple<int, bool>> {
   // Mutates 'config' by changing the model's base path to point to a variant
   // of half-plus-two that has two versions instead of one.
   void SwitchToHalfPlusTwoWith2Versions(ModelServerConfig* config);
-
-  // Creates some reasonable default ServerCore options for tests.
-  ServerCore::Options GetDefaultOptions();
 
   // Creates a ServerCore object configured with both a fake platform and the
   // tensorflow platform, using the supplied options.

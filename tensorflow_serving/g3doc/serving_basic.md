@@ -50,7 +50,7 @@ export_path_base = sys.argv[-1]
 export_path = os.path.join(
       compat.as_bytes(export_path_base),
       compat.as_bytes(str(FLAGS.model_version)))
-print 'Exporting trained model to', export_path
+print('Exporting trained model to', export_path)
 builder = tf.saved_model.builder.SavedModelBuilder(export_path)
 builder.add_meta_graph_and_variables(
       sess, [tf.saved_model.tag_constants.SERVING],
@@ -86,7 +86,7 @@ You can add meta graph and variables to the builder using
     predefined SavedModel tag constants. For more details, see
     [tag_constants.py](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/saved_model/tag_constants.py)
     and
-    [related TensorFlow API documentation](https://www.tensorflow.org/api_docs/python/tf/saved_model/tag_constants).
+    [related TensorFlow API documentation](https://www.tensorflow.org/api_docs/python/tf/compat/v1/saved_model/tag_constants).
 
 *   `signature_def_map` specifies the map of user-supplied key for a
     **signature** to a tensorflow::SignatureDef to add to the meta graph.

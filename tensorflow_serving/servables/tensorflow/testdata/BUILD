@@ -12,6 +12,15 @@ package(
 
 licenses(["notice"])  # Apache 2.0
 
+exports_files(
+    [
+        "half_plus_two_model_metadata.json",
+        "saved_model_half_plus_two_2_versions_metadata.json",
+        "saved_model_half_plus_two_tf2_2_versions_metadata.json",
+    ],
+    visibility = ["//tensorflow_serving:internal"],
+)
+
 filegroup(
     name = "all_files",
     srcs = glob(
@@ -35,28 +44,13 @@ filegroup(
 )
 
 py_binary(
-    name = "export_half_plus_two",
-    srcs = [
-        "export_half_plus_two.py",
-    ],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
-    deps = [
-        "@org_tensorflow//tensorflow:tensorflow_py",
-        "@org_tensorflow//tensorflow/contrib/session_bundle:exporter",
-    ],
-)
-
-py_binary(
     name = "export_bad_half_plus_two",
     srcs = [
         "export_bad_half_plus_two.py",
     ],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
-    deps = [
-        "@org_tensorflow//tensorflow:tensorflow_py",
-    ],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = ["@org_tensorflow//tensorflow:tensorflow_py"],
 )
 
 py_binary(
@@ -66,9 +60,7 @@ py_binary(
     ],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [
-        "@org_tensorflow//tensorflow:tensorflow_py",
-    ],
+    deps = ["@org_tensorflow//tensorflow:tensorflow_py"],
 )
 
 py_binary(
@@ -76,10 +68,11 @@ py_binary(
     srcs = [
         "saved_model_half_plus_two.py",
     ],
-    python_version = "PY2",
-    srcs_version = "PY2AND3",
+    python_version = "PY3",
+    srcs_version = "PY3",
     deps = [
         "@org_tensorflow//tensorflow:tensorflow_py",
+        "@org_tensorflow//tensorflow/lite/tools/signature:signature_def_utils",
     ],
 )
 
@@ -87,6 +80,20 @@ filegroup(
     name = "saved_model_half_plus_two_cpu",
     srcs = glob(
         ["saved_model_half_plus_two_cpu/**"],
+    ),
+)
+
+filegroup(
+    name = "saved_model_half_plus_two_tf2_cpu",
+    srcs = glob(
+        ["saved_model_half_plus_two_tf2_cpu/**"],
+    ),
+)
+
+filegroup(
+    name = "saved_model_half_plus_two_mlmd",
+    srcs = glob(
+        ["saved_model_half_plus_two_mlmd/**"],
     ),
 )
 
@@ -105,18 +112,41 @@ filegroup(
 )
 
 filegroup(
+    name = "saved_model_half_plus_two_tflite",
+    srcs = glob(
+        ["saved_model_half_plus_two_tflite/**"],
+    ),
+)
+
+filegroup(
+    name = "saved_model_half_plus_two_tflite_with_sigdef",
+    srcs = glob(
+        ["saved_model_half_plus_two_tflite_with_sigdef/**"],
+    ),
+)
+
+filegroup(
     name = "saved_model_half_plus_two_gpu_trt",
     srcs = glob(
         ["saved_model_half_plus_two_gpu_trt/**"],
     ),
 )
 
-# Note: re-generate these files with :export_half_plus_two whenever model
-# changes.
+filegroup(
+    name = "tf_text_regression",
+    srcs = glob(
+        ["tf_text_regression/**"],
+    ),
+)
+
+filegroup(
+    name = "mobilenet_v1_quant_tflite",
+    srcs = glob(
+        ["mobilenet_v1_quant_tflite/**"],
+    ),
+)
+
 exports_files([
-    "half_plus_two/00000123/export.data-00000-of-00001",
-    "half_plus_two/00000123/export.index",
-    "half_plus_two/00000123/export.meta",
     "saved_model_half_plus_three/00000123/saved_model.pb",
     "saved_model_half_plus_three/00000123/assets/foo.txt",
     "saved_model_half_plus_three/00000123/variables/variables.data-00000-of-00001",

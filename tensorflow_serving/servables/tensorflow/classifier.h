@@ -20,35 +20,19 @@ limitations under the License.
 
 #include <memory>
 
+#include "absl/types/optional.h"
 #include "tensorflow/cc/saved_model/loader.h"
-#include "tensorflow/contrib/session_bundle/session_bundle.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/threadpool_options.h"
 #include "tensorflow_serving/apis/classifier.h"
-#include "tensorflow_serving/util/optional.h"
 
 namespace tensorflow {
 namespace serving {
-
-// Create a new ClassifierInterface backed by a TensorFlow Session.
-// Requires the SessionBundle manifest to have a ClassificationSignature
-// as the default signature.
-Status CreateClassifierFromBundle(
-    std::unique_ptr<SessionBundle> bundle,
-    std::unique_ptr<ClassifierInterface>* service);
 
 // Create a new ClassifierInterface backed by a TensorFlow SavedModel.
 // Requires that the default SignatureDef be compatible with classification.
 Status CreateClassifierFromSavedModelBundle(
     const RunOptions& run_options, std::unique_ptr<SavedModelBundle> bundle,
-    std::unique_ptr<ClassifierInterface>* service);
-
-// Create a new ClassifierInterface backed by a TensorFlow Session using the
-// specified ClassificationSignature. Does not take ownership of the Session.
-// Useful in contexts where we need to avoid copying, e.g. if created per
-// request. The caller must ensure that the session and signature live at least
-// as long as the service.
-Status CreateFlyweightTensorFlowClassifier(
-    Session* session, const ClassificationSignature* signature,
     std::unique_ptr<ClassifierInterface>* service);
 
 // Create a new ClassifierInterface backed by a TensorFlow Session using the
@@ -61,6 +45,13 @@ Status CreateFlyweightTensorFlowClassifier(
     const SignatureDef* signature,
     std::unique_ptr<ClassifierInterface>* service);
 
+// Similar to the above function, but with an additional thread_pool_factory.
+Status CreateFlyweightTensorFlowClassifier(
+    const RunOptions& run_options, Session* session,
+    const SignatureDef* signature,
+    const thread::ThreadPoolOptions& thread_pool_options,
+    std::unique_ptr<ClassifierInterface>* service);
+
 // Get a classification signature from the meta_graph_def that's either:
 // 1) The signature that model_spec explicitly specifies to use.
 // 2) The default serving signature.
@@ -69,8 +60,8 @@ Status GetClassificationSignatureDef(const ModelSpec& model_spec,
                                      const MetaGraphDef& meta_graph_def,
                                      SignatureDef* signature);
 
-// Validate a SignatureDef to make sure it's compatible with classification, and
-// if so, populate the input and output tensor names.
+// Validate a SignatureDef to make sure it's compatible with classification.
+// Populate the input and output tensor names, if the args are not nullptr.
 //
 // NOTE: output_tensor_names may already have elements in it (e.g. when building
 // a full list of outputs from multiple signatures), and this function will just
@@ -88,9 +79,11 @@ Status PostProcessClassificationResult(
 // Creates SavedModelTensorflowClassifier and runs Classification on it.
 Status RunClassify(const RunOptions& run_options,
                    const MetaGraphDef& meta_graph_def,
-                   const optional<int64>& servable_version, Session* session,
-                   const ClassificationRequest& request,
-                   ClassificationResponse* response);
+                   const absl::optional<int64>& servable_version,
+                   Session* session, const ClassificationRequest& request,
+                   ClassificationResponse* response,
+                   const thread::ThreadPoolOptions& thread_pool_options =
+                       thread::ThreadPoolOptions());
 
 }  // namespace serving
 }  // namespace tensorflow

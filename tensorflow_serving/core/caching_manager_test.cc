@@ -33,7 +33,6 @@ limitations under the License.
 #include "tensorflow_serving/core/test_util/fake_loader_source_adapter.h"
 #include "tensorflow_serving/core/test_util/manager_test_util.h"
 #include "tensorflow_serving/util/event_bus.h"
-#include "tensorflow_serving/util/optional.h"
 #include "tensorflow_serving/util/threadpool_executor.h"
 
 namespace tensorflow {
@@ -107,13 +106,13 @@ class StringLoaderFactory : public CachingManager::LoaderFactory {
   mutable mutex mu_;
 
   // The current earliest version.
-  int64 earliest_version_ GUARDED_BY(mu_) = 0;
+  int64 earliest_version_ TF_GUARDED_BY(mu_) = 0;
 
   // The current latest version.
-  int64 latest_version_ GUARDED_BY(mu_) = 0;
+  int64 latest_version_ TF_GUARDED_BY(mu_) = 0;
 
   // Tracks the number of loaders dispensed by the loader-factory.
-  int64 num_loaders_dispensed_ GUARDED_BY(mu_) = 0;
+  int64 num_loaders_dispensed_ TF_GUARDED_BY(mu_) = 0;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StringLoaderFactory);
 };

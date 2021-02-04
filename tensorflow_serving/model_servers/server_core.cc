@@ -28,8 +28,6 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/model_platform_types.h"
 #include "tensorflow_serving/resources/resource_values.h"
 #include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/sources/storage_path/file_system_storage_path_source.h"
 #include "tensorflow_serving/sources/storage_path/file_system_storage_path_source.pb.h"
 
@@ -305,7 +303,7 @@ Status ServerCore::WaitUntilModelsAvailable(const std::set<string>& models,
                                      " model(s) did not become available: {");
     for (const auto& id_and_state : states_reached) {
       if (id_and_state.second != ServableState::ManagerState::kAvailable) {
-        optional<ServableState> maybe_state =
+        absl::optional<ServableState> maybe_state =
             monitor->GetState(id_and_state.first);
         const string error_msg =
             maybe_state && !maybe_state.value().health.ok()
@@ -322,7 +320,7 @@ Status ServerCore::WaitUntilModelsAvailable(const std::set<string>& models,
 }
 
 Status ServerCore::AddModelsViaModelConfigList() {
-  const bool is_first_config = storage_path_source_and_router_ == nullopt;
+  const bool is_first_config = storage_path_source_and_router_ == absl::nullopt;
 
   // Create/reload the source, source router and source adapters.
   const FileSystemStoragePathSourceConfig source_config =
@@ -340,8 +338,9 @@ Status ServerCore::AddModelsViaModelConfigList() {
     std::unique_ptr<DynamicSourceRouter<StoragePath>> router;
     TF_RETURN_IF_ERROR(CreateRouter(routes, &adapters, &router));
     std::unique_ptr<FileSystemStoragePathSource> source;
-    TF_RETURN_IF_ERROR(
-        CreateStoragePathSource(source_config, router.get(), &source));
+    std::unique_ptr<PrefixStoragePathSourceAdapter> prefix_source_adapter;
+    TF_RETURN_IF_ERROR(CreateStoragePathSource(
+        source_config, router.get(), &source, &prefix_source_adapter));
 
     // Connect the adapters to the manager, and wait for the models to load.
     TF_RETURN_IF_ERROR(ConnectAdaptersToManagerAndAwaitModelLoads(&adapters));
@@ -349,6 +348,9 @@ Status ServerCore::AddModelsViaModelConfigList() {
     // Stow the source components.
     storage_path_source_and_router_ = {source.get(), router.get()};
     manager_.AddDependency(std::move(source));
+    if (prefix_source_adapter != nullptr) {
+      manager_.AddDependency(std::move(prefix_source_adapter));
+    }
     manager_.AddDependency(std::move(router));
     for (auto& entry : adapters.platform_adapters) {
       auto& adapter = entry.second;
@@ -535,6 +537,18 @@ Status ServerCore::UpdateModelVersionLabelMap() {
     return Status::OK();
   }
 
+  if (VLOG_IS_ON(4)) {
+    VLOG(4) << "Updated model label map is: ";
+    for (const auto& model_name_and_version_labels : *new_label_map) {
+      for (const auto& label_and_version :
+           model_name_and_version_labels.second) {
+        VLOG(4) << "\t Model name: " << model_name_and_version_labels.first
+                << "\t label: " << label_and_version.first
+                << " at version: " << label_and_version.second;
+      }
+    }
+  }
+
   mutex_lock l(model_labels_to_versions_mu_);
   model_labels_to_versions_.swap(new_label_map);
 
@@ -601,14 +615,22 @@ Status ServerCore::CreateStoragePathRoutes(
 Status ServerCore::CreateStoragePathSource(
     const FileSystemStoragePathSourceConfig& config,
     Target<StoragePath>* target,
-    std::unique_ptr<FileSystemStoragePathSource>* source) const {
+    std::unique_ptr<FileSystemStoragePathSource>* source,
+    std::unique_ptr<PrefixStoragePathSourceAdapter>* prefix_source_adapter) {
   const Status status = FileSystemStoragePathSource::Create(config, source);
   if (!status.ok()) {
     VLOG(1) << "Unable to create FileSystemStoragePathSource due to: "
             << status;
     return status;
   }
-  ConnectSourceToTarget(source->get(), target);
+  if (options_.storage_path_prefix.empty()) {
+    ConnectSourceToTarget(source->get(), target);
+  } else {
+    *prefix_source_adapter = absl::make_unique<PrefixStoragePathSourceAdapter>(
+        options_.storage_path_prefix);
+    ConnectSourceToTarget(source->get(), prefix_source_adapter->get());
+    ConnectSourceToTarget(prefix_source_adapter->get(), target);
+  }
   return Status::OK();
 }
 

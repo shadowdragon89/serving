@@ -19,6 +19,7 @@ limitations under the License.
 #include "tensorflow_serving/apis/prediction_service.grpc.pb.h"
 #include "tensorflow_serving/model_servers/server_core.h"
 #include "tensorflow_serving/servables/tensorflow/predict_impl.h"
+#include "tensorflow_serving/servables/tensorflow/thread_pool_factory.h"
 
 namespace tensorflow {
 namespace serving {
@@ -28,15 +29,15 @@ class PredictionServiceImpl final : public PredictionService::Service {
   // Options for configuring a PredictionServiceImpl object.
   struct Options {
     ServerCore* server_core;
-    bool use_saved_model;
     bool enforce_session_run_timeout;
+    ThreadPoolFactory* thread_pool_factory = nullptr;
   };
 
   explicit PredictionServiceImpl(const Options& options)
       : core_(options.server_core),
-        predictor_(new TensorflowPredictor(options.use_saved_model)),
-        use_saved_model_(options.use_saved_model),
-        enforce_session_run_timeout_(options.enforce_session_run_timeout) {}
+        predictor_(new TensorflowPredictor(options.thread_pool_factory)),
+        enforce_session_run_timeout_(options.enforce_session_run_timeout),
+        thread_pool_factory_(options.thread_pool_factory) {}
 
   ::grpc::Status Predict(::grpc::ServerContext* context,
                          const PredictRequest* request,
@@ -61,8 +62,8 @@ class PredictionServiceImpl final : public PredictionService::Service {
  private:
   ServerCore* core_;
   std::unique_ptr<TensorflowPredictor> predictor_;
-  const bool use_saved_model_;
   const bool enforce_session_run_timeout_;
+  ThreadPoolFactory* thread_pool_factory_;
 };
 
 }  // namespace serving

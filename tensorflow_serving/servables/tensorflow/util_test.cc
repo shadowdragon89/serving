@@ -25,15 +25,22 @@ limitations under the License.
 #include "tensorflow/core/lib/histogram/histogram.h"
 #include "tensorflow/core/lib/monitoring/counter.h"
 #include "tensorflow/core/lib/monitoring/sampler.h"
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow_serving/servables/tensorflow/bundle_factory_test_util.h"
 #include "tensorflow_serving/test_util/test_util.h"
+#include "tensorflow_serving/util/test_util/mock_file_probing_env.h"
 
 namespace tensorflow {
 namespace serving {
 namespace {
 
 using test_util::EqualsProto;
+using ::testing::_;
+using ::testing::DoAll;
 using ::testing::Eq;
 using ::testing::HasSubstr;
+using ::testing::Return;
+using ::testing::SetArgPointee;
 
 class InputUtilTest : public ::testing::Test {
  protected:
@@ -94,7 +101,7 @@ TEST_F(InputUtilTest, ExampleList) {
 
   TF_ASSERT_OK(InputToSerializedExampleTensor(input_, &tensor_));
   EXPECT_EQ(2, tensor_.NumElements());
-  const auto vec = tensor_.flat<string>();
+  const auto vec = tensor_.flat<tstring>();
   ASSERT_EQ(vec.size(), 2);
   Example serialized_example;
   ASSERT_TRUE(serialized_example.ParseFromString(vec(0)));
@@ -112,7 +119,7 @@ TEST_F(InputUtilTest, ExampleListWithContext) {
 
   TF_ASSERT_OK(InputToSerializedExampleTensor(input_, &tensor_));
   EXPECT_EQ(2, tensor_.NumElements());
-  const auto vec = tensor_.flat<string>();
+  const auto vec = tensor_.flat<tstring>();
   ASSERT_EQ(vec.size(), 2);
   {
     Example serialized_example;
@@ -142,7 +149,7 @@ TEST_F(InputUtilTest, ExampleListWithOverridingContext) {
 
   TF_ASSERT_OK(InputToSerializedExampleTensor(input_, &tensor_));
   EXPECT_EQ(2, tensor_.NumElements());
-  const auto vec = tensor_.flat<string>();
+  const auto vec = tensor_.flat<tstring>();
   ASSERT_EQ(vec.size(), 2);
   {
     Example serialized_example;
@@ -168,7 +175,7 @@ TEST_F(InputUtilTest, ExampleListWithContext_NoContext) {
 
   TF_ASSERT_OK(InputToSerializedExampleTensor(input_, &tensor_));
   EXPECT_EQ(2, tensor_.NumElements());
-  const auto vec = tensor_.flat<string>();
+  const auto vec = tensor_.flat<tstring>();
   ASSERT_EQ(vec.size(), 2);
   {
     Example serialized_example;
@@ -266,6 +273,41 @@ TEST(ModelSpecTest, AllOptionalSet) {
   EXPECT_THAT(model_spec.name(), Eq("foo"));
   EXPECT_THAT(model_spec.signature_name(), Eq("classify"));
   EXPECT_THAT(model_spec.version().value(), Eq(1));
+}
+
+TEST(SignatureMethodNameCheckFeature, SetGet) {
+  SetSignatureMethodNameCheckFeature(true);
+  EXPECT_TRUE(GetSignatureMethodNameCheckFeature());
+
+  SetSignatureMethodNameCheckFeature(false);
+  EXPECT_FALSE(GetSignatureMethodNameCheckFeature());
+}
+
+TEST(ResourceEstimatorTest, EstimateResourceFromPathUsingDiskState) {
+  const string export_dir = "/foo/bar";
+  const string child = "child";
+  const string child_path = io::JoinPath(export_dir, child);
+  const double file_size = 100;
+
+  // Set up the expectation that the directory contains exactly one child with
+  // the given file size.
+  test_util::MockFileProbingEnv env;
+  EXPECT_CALL(env, FileExists(export_dir)).WillRepeatedly(Return(Status::OK()));
+  EXPECT_CALL(env, GetChildren(export_dir, _))
+      .WillRepeatedly(DoAll(SetArgPointee<1>(std::vector<string>({child})),
+                            Return(Status::OK())));
+  EXPECT_CALL(env, IsDirectory(child_path))
+      .WillRepeatedly(Return(errors::FailedPrecondition("")));
+  EXPECT_CALL(env, GetFileSize(child_path, _))
+      .WillRepeatedly(DoAll(SetArgPointee<1>(file_size), Return(Status::OK())));
+
+  ResourceAllocation actual;
+  TF_ASSERT_OK(
+      EstimateResourceFromPathUsingDiskState(export_dir, &env, &actual));
+
+  ResourceAllocation expected =
+      test_util::GetExpectedResourceEstimate(file_size);
+  EXPECT_THAT(actual, EqualsProto(expected));
 }
 
 }  // namespace

@@ -182,7 +182,24 @@ int main(int argc, char** argv) {
       tensorflow::Flag(
           "monitoring_config_file", &options.monitoring_config_file,
           "If non-empty, read an ascii MonitoringConfig protobuf from "
-          "the supplied file name")};
+          "the supplied file name"),
+      tensorflow::Flag(
+          "remove_unused_fields_from_bundle_metagraph",
+          &options.remove_unused_fields_from_bundle_metagraph,
+          "Removes unused fields from MetaGraphDef proto message to save "
+          "memory."),
+      tensorflow::Flag("prefer_tflite_model", &options.prefer_tflite_model,
+                       "EXPERIMENTAL; CAN BE REMOVED ANYTIME! "
+                       "Prefer TensorFlow Lite model from `model.tflite` file "
+                       "in SavedModel directory, instead of the TensorFlow "
+                       "model from `saved_model.pb` file. "
+                       "If no TensorFlow Lite model found, fallback to "
+                       "TensorFlow model."),
+      tensorflow::Flag(
+          "enable_signature_method_name_check",
+          &options.enable_signature_method_name_check,
+          "Enable method_name check for SignatureDef. Disable this if serving "
+          "native TF2 regression/classification models.")};
 
   const auto& usage = tensorflow::Flags::Usage(argv[0], flag_list);
   if (!tensorflow::Flags::Parse(&argc, argv, flag_list)) {

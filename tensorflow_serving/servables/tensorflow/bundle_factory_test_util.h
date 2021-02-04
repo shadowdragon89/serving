@@ -28,17 +28,21 @@ namespace test_util {
 // Returns the path of the Saved Model (the pb version) for the half plus two
 // model.
 string GetTestSavedModelPath();
+string GetTestMLMetadataSavedModelPath();
 
 // Returns the Session Bundle export path for the half plus two model.
 string GetTestSessionBundleExportPath();
 
-// Returns the paths of the files of the Saved Model (the pb version) for the
-// half plus two model.
-std::vector<string> GetTestSavedModelFiles();
+// Returns the path of TensorFlow Lite model for the half plus two model.
+string GetTestTfLiteModelPath();
 
 // Returns the paths of the files of the Session Bundle export for the half plus
 // two model.
 std::vector<string> GetTestSessionBundleExportFiles();
+
+// Returns the paths of the files of the SavedModel Bundle export for the half
+// plus two model.
+std::vector<string> GetTestSavedModelBundleExportFiles();
 
 // Returns the total size of the given files. Requires the files to exist.
 uint64 GetTotalFileSize(const std::vector<string>& files);

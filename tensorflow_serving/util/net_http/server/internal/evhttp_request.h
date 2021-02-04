@@ -96,6 +96,9 @@ class EvHTTPRequest final : public ServerRequestInterface {
   void PartialReplyWithStatus(HTTPStatusCode status) override;
   void PartialReply() override;
 
+  CallbackStatus PartialReplyWithFlushCallback(
+      std::function<void()> callback) override;
+
   void ReplyWithStatus(HTTPStatusCode status) override;
   void Reply() override;
 

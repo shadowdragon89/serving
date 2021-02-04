@@ -18,7 +18,6 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/cc/saved_model/signature_constants.h"
-#include "tensorflow/contrib/session_bundle/session_bundle.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow_serving/core/availability_preserving_policy.h"
 #include "tensorflow_serving/model_servers/model_platform_types.h"
@@ -26,8 +25,10 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/server_core.h"
 #include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.pb.h"
+#include "tensorflow_serving/servables/tensorflow/test_util/fake_thread_pool_factory.h"
+#include "tensorflow_serving/servables/tensorflow/test_util/fake_thread_pool_factory.pb.h"
 #include "tensorflow_serving/test_util/test_util.h"
+#include "tensorflow_serving/util/oss_or_google.h"
 
 namespace tensorflow {
 namespace serving {
@@ -39,40 +40,27 @@ constexpr int kTestModelVersion = 123;
 const char kInputTensorKey[] = "x";
 const char kOutputTensorKey[] = "y";
 
-// Parameter is 'bool use_saved_model'.
-class PredictImplTest : public ::testing::TestWithParam<bool> {
+class PredictImplTest : public ::testing::Test {
  public:
   static void SetUpTestSuite() {
-    TF_ASSERT_OK(
-        CreateServerCore(test_util::TestSrcDirPath(
-                             "/servables/tensorflow/testdata/half_plus_two"),
-                         false, &server_core_));
-    const string bad_half_plus_two_path = test_util::TestSrcDirPath(
-        "/servables/tensorflow/testdata/bad_half_plus_two");
-    TF_ASSERT_OK(CreateServerCore(bad_half_plus_two_path, false,
-                                  &server_core_bad_model_));
-
     TF_ASSERT_OK(CreateServerCore(test_util::TensorflowTestSrcDirPath(
                                       "cc/saved_model/testdata/half_plus_two"),
-                                  true, &saved_model_server_core_));
-    TF_ASSERT_OK(CreateServerCore(bad_half_plus_two_path, true,
-                                  &saved_model_server_core_bad_model_));
+                                  &saved_model_server_core_));
     TF_ASSERT_OK(CreateServerCore(
         test_util::TestSrcDirPath(
             "/servables/tensorflow/testdata/saved_model_counter"),
-        true, &saved_model_server_core_counter_model_));
+        &saved_model_server_core_counter_model_));
   }
 
   static void TearDownTestSuite() {
     server_core_.reset();
     server_core_bad_model_.reset();
     saved_model_server_core_.reset();
-    saved_model_server_core_bad_model_.reset();
     saved_model_server_core_counter_model_.reset();
   }
 
  protected:
-  static Status CreateServerCore(const string& model_path, bool use_saved_model,
+  static Status CreateServerCore(const string& model_path,
                                  std::unique_ptr<ServerCore>* server_core) {
     ModelServerConfig config;
     auto model_config = config.mutable_model_config_list()->add_config();
@@ -84,8 +72,8 @@ class PredictImplTest : public ::testing::TestWithParam<bool> {
     // unspecified so the default servable_state_monitor_creator will be used.
     ServerCore::Options options;
     options.model_server_config = config;
-    options.platform_config_map = CreateTensorFlowPlatformConfigMap(
-        SessionBundleConfig(), use_saved_model);
+    options.platform_config_map =
+        CreateTensorFlowPlatformConfigMap(SessionBundleConfig());
     options.aspired_version_policy =
         std::unique_ptr<AspiredVersionPolicy>(new AvailabilityPreservingPolicy);
     // Reduce the number of initial load threads to be num_load_threads to avoid
@@ -94,19 +82,7 @@ class PredictImplTest : public ::testing::TestWithParam<bool> {
     return ServerCore::Create(std::move(options), server_core);
   }
 
-  ServerCore* GetServerCore() {
-    if (GetParam()) {
-      return saved_model_server_core_.get();
-    }
-    return server_core_.get();
-  }
-
-  ServerCore* GetServerCoreWithBadModel() {
-    if (GetParam()) {
-      return saved_model_server_core_bad_model_.get();
-    }
-    return server_core_bad_model_.get();
-  }
+  ServerCore* GetServerCore() { return saved_model_server_core_.get(); }
 
   ServerCore* GetServerCoreWithCounterModel() {
     return saved_model_server_core_counter_model_.get();
@@ -118,23 +94,21 @@ class PredictImplTest : public ::testing::TestWithParam<bool> {
   static std::unique_ptr<ServerCore> server_core_;
   static std::unique_ptr<ServerCore> server_core_bad_model_;
   static std::unique_ptr<ServerCore> saved_model_server_core_;
-  static std::unique_ptr<ServerCore> saved_model_server_core_bad_model_;
   static std::unique_ptr<ServerCore> saved_model_server_core_counter_model_;
 };
 
 std::unique_ptr<ServerCore> PredictImplTest::server_core_;
 std::unique_ptr<ServerCore> PredictImplTest::server_core_bad_model_;
 std::unique_ptr<ServerCore> PredictImplTest::saved_model_server_core_;
-std::unique_ptr<ServerCore> PredictImplTest::saved_model_server_core_bad_model_;
 std::unique_ptr<ServerCore>
     PredictImplTest::saved_model_server_core_counter_model_;
 
-TEST_P(PredictImplTest, MissingOrEmptyModelSpec) {
+TEST_F(PredictImplTest, MissingOrEmptyModelSpec) {
   PredictRequest request;
   PredictResponse response;
 
   // Empty request is invalid.
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   EXPECT_EQ(
       tensorflow::error::INVALID_ARGUMENT,
       predictor.Predict(GetRunOptions(), GetServerCore(), request, &response)
@@ -157,7 +131,7 @@ TEST_P(PredictImplTest, MissingOrEmptyModelSpec) {
           .code());
 }
 
-TEST_P(PredictImplTest, EmptyInputList) {
+TEST_F(PredictImplTest, EmptyInputList) {
   PredictRequest request;
   PredictResponse response;
 
@@ -165,7 +139,7 @@ TEST_P(PredictImplTest, EmptyInputList) {
   model_spec->set_name(kTestModelName);
   model_spec->mutable_version()->set_value(kTestModelVersion);
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   // The input is empty.
   EXPECT_EQ(
       tensorflow::error::INVALID_ARGUMENT,
@@ -173,7 +147,7 @@ TEST_P(PredictImplTest, EmptyInputList) {
           .code());
 }
 
-TEST_P(PredictImplTest, InputTensorsDontMatchModelSpecInputs) {
+TEST_F(PredictImplTest, InputTensorsDontMatchModelSpecInputs) {
   PredictRequest request;
   PredictResponse response;
 
@@ -186,7 +160,7 @@ TEST_P(PredictImplTest, InputTensorsDontMatchModelSpecInputs) {
   tensor_proto.set_dtype(tensorflow::DT_STRING);
   tensor_proto.mutable_tensor_shape()->add_dim()->set_size(1);
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   auto inputs = request.mutable_inputs();
   (*inputs)["key"] = tensor_proto;
   EXPECT_EQ(
@@ -195,7 +169,7 @@ TEST_P(PredictImplTest, InputTensorsDontMatchModelSpecInputs) {
           .code());
 }
 
-TEST_P(PredictImplTest, OutputFiltersDontMatchModelSpecOutputs) {
+TEST_F(PredictImplTest, OutputFiltersDontMatchModelSpecOutputs) {
   PredictRequest request;
   PredictResponse response;
 
@@ -209,7 +183,7 @@ TEST_P(PredictImplTest, OutputFiltersDontMatchModelSpecOutputs) {
   (*request.mutable_inputs())[kInputTensorKey] = tensor_proto;
   request.add_output_filter("output_filter");
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   // Output filter like this doesn't exist.
   EXPECT_EQ(
       tensorflow::error::INVALID_ARGUMENT,
@@ -229,7 +203,7 @@ TEST_P(PredictImplTest, OutputFiltersDontMatchModelSpecOutputs) {
           .code());
 }
 
-TEST_P(PredictImplTest, InputTensorsHaveWrongType) {
+TEST_F(PredictImplTest, InputTensorsHaveWrongType) {
   PredictRequest request;
   PredictResponse response;
 
@@ -244,7 +218,7 @@ TEST_P(PredictImplTest, InputTensorsHaveWrongType) {
   (*request.mutable_inputs())[kInputTensorKey] = tensor_proto;
   request.add_output_filter(kOutputTensorKey);
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   // Input tensors are all wrong.
   EXPECT_EQ(
       tensorflow::error::INVALID_ARGUMENT,
@@ -252,24 +226,7 @@ TEST_P(PredictImplTest, InputTensorsHaveWrongType) {
           .code());
 }
 
-TEST_P(PredictImplTest, ModelMissingSignatures) {
-  PredictRequest request;
-  PredictResponse response;
-
-  ModelSpec* model_spec = request.mutable_model_spec();
-  model_spec->set_name(kTestModelName);
-  model_spec->mutable_version()->set_value(kTestModelVersion);
-
-  // Model is missing signatures.
-  TensorflowPredictor predictor(GetParam());
-  EXPECT_EQ(tensorflow::error::FAILED_PRECONDITION,
-            predictor
-                .Predict(GetRunOptions(), GetServerCoreWithBadModel(), request,
-                         &response)
-                .code());
-}
-
-TEST_P(PredictImplTest, PredictionSuccess) {
+TEST_F(PredictImplTest, PredictionSuccess) {
   PredictRequest request;
   PredictResponse response;
 
@@ -282,7 +239,7 @@ TEST_P(PredictImplTest, PredictionSuccess) {
   tensor_proto.set_dtype(tensorflow::DT_FLOAT);
   (*request.mutable_inputs())[kInputTensorKey] = tensor_proto;
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   TF_EXPECT_OK(
       predictor.Predict(GetRunOptions(), GetServerCore(), request, &response));
   TensorProto output_tensor_proto;
@@ -291,19 +248,15 @@ TEST_P(PredictImplTest, PredictionSuccess) {
   output_tensor_proto.mutable_tensor_shape();
   PredictResponse expected_response;
   *expected_response.mutable_model_spec() = *model_spec;
-  // signature_name in ModelSpec is populated only for SavedModels.
-  if (GetParam()) {
-    expected_response.mutable_model_spec()->set_signature_name(
-        kDefaultServingSignatureDefKey);
-  }
+  expected_response.mutable_model_spec()->set_signature_name(
+      kDefaultServingSignatureDefKey);
   (*expected_response.mutable_outputs())[kOutputTensorKey] =
       output_tensor_proto;
   EXPECT_THAT(response, test_util::EqualsProto(expected_response));
 }
 
-// Test querying a model with a named regression signature (not default). This
-// will work with SavedModel but not supported in the legacy SessionBundle.
-TEST_P(PredictImplTest, PredictionWithNamedRegressionSignature) {
+// Test querying a model with a named regression signature (not default).
+TEST_F(PredictImplTest, PredictionWithNamedRegressionSignature) {
   PredictRequest request;
   PredictResponse response;
 
@@ -316,18 +269,9 @@ TEST_P(PredictImplTest, PredictionWithNamedRegressionSignature) {
   tensor_proto.add_float_val(2.0);
   tensor_proto.set_dtype(tensorflow::DT_FLOAT);
   (*request.mutable_inputs())[kRegressInputs] = tensor_proto;
-  TensorflowPredictor predictor(GetParam());
-  // This request is expected to work with SavedModel, but not SessionBundle.
-  if (GetParam()) {
-    TF_ASSERT_OK(predictor.Predict(GetRunOptions(), GetServerCore(), request,
-                                   &response));
-  } else {
-    ASSERT_EQ(
-        tensorflow::error::INVALID_ARGUMENT,
-        predictor.Predict(GetRunOptions(), GetServerCore(), request, &response)
-            .code());
-    return;
-  }
+  TensorflowPredictor predictor;
+  TF_ASSERT_OK(
+      predictor.Predict(GetRunOptions(), GetServerCore(), request, &response));
   TensorProto output_tensor_proto;
   output_tensor_proto.add_float_val(4);
   output_tensor_proto.set_dtype(tensorflow::DT_FLOAT);
@@ -339,9 +283,8 @@ TEST_P(PredictImplTest, PredictionWithNamedRegressionSignature) {
 }
 
 // Test querying a model with a classification signature. Predict calls work
-// with predict, classify, and regress signatures when using SavedModel, but
-// will only work with a generic signature when using legacy SessionBundle.
-TEST_P(PredictImplTest, PredictionWithNamedClassificationSignature) {
+// with predict, classify, and regress signatures when using SavedModel.
+TEST_F(PredictImplTest, PredictionWithNamedClassificationSignature) {
   PredictRequest request;
   PredictResponse response;
 
@@ -355,16 +298,7 @@ TEST_P(PredictImplTest, PredictionWithNamedClassificationSignature) {
   tensor_proto.set_dtype(tensorflow::DT_FLOAT);
   (*request.mutable_inputs())[kClassifyInputs] = tensor_proto;
 
-  TensorflowPredictor predictor(GetParam());
-  // This request is expected to work with SavedModel, but not SessionBundle.
-  const bool using_session_bundle = !GetParam();
-  if (using_session_bundle) {
-    ASSERT_EQ(
-        tensorflow::error::INVALID_ARGUMENT,
-        predictor.Predict(GetRunOptions(), GetServerCore(), request, &response)
-            .code());
-    return;
-  }
+  TensorflowPredictor predictor;
   TF_ASSERT_OK(
       predictor.Predict(GetRunOptions(), GetServerCore(), request, &response));
   TensorProto output_tensor_proto;
@@ -385,27 +319,16 @@ TEST_P(PredictImplTest, PredictionWithNamedClassificationSignature) {
 // *Notes*: These signatures are stateful and over-simplied only to demonstrate
 // Predict calls with only inputs or outputs. State is not supported in
 // TensorFlow Serving on most scalable or production hosting environments.
-TEST_P(PredictImplTest, PredictionWithCustomizedSignatures) {
+TEST_F(PredictImplTest, PredictionWithCustomizedSignatures) {
   PredictRequest request;
   PredictResponse response;
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
 
   // Call get_counter. Expected result 0.
   ModelSpec* model_spec = request.mutable_model_spec();
   model_spec->set_name(kTestModelName);
   model_spec->mutable_version()->set_value(kTestModelVersion);
   model_spec->set_signature_name("get_counter");
-
-  // This request is expected to work with SavedModel, but not SessionBundle.
-  const bool using_session_bundle = !GetParam();
-  if (using_session_bundle) {
-    ASSERT_EQ(tensorflow::error::INVALID_ARGUMENT,
-              predictor
-                  .Predict(GetRunOptions(), GetServerCoreWithCounterModel(),
-                           request, &response)
-                  .code());
-    return;
-  }
 
   TF_ASSERT_OK(predictor.Predict(
       GetRunOptions(), GetServerCoreWithCounterModel(), request, &response));
@@ -486,7 +409,7 @@ TEST_P(PredictImplTest, PredictionWithCustomizedSignatures) {
 
 // Verifies that PredictWithModelSpec() uses the model spec override rather than
 // the one in the request.
-TEST_P(PredictImplTest, ModelSpecOverride) {
+TEST_F(PredictImplTest, ModelSpecOverride) {
   auto request = test_util::CreateProto<PredictRequest>(
       "model_spec {"
       "  name: \"test_model\""
@@ -494,7 +417,7 @@ TEST_P(PredictImplTest, ModelSpecOverride) {
   auto model_spec_override =
       test_util::CreateProto<ModelSpec>("name: \"nonexistent_model\"");
 
-  TensorflowPredictor predictor(GetParam());
+  TensorflowPredictor predictor;
   PredictResponse response;
   EXPECT_NE(tensorflow::error::NOT_FOUND,
             predictor.Predict(RunOptions(), GetServerCore(), request, &response)
@@ -506,8 +429,47 @@ TEST_P(PredictImplTest, ModelSpecOverride) {
                 .code());
 }
 
-// Test all PredictImplTest test cases with both SessionBundle and SavedModel.
-INSTANTIATE_TEST_CASE_P(UseSavedModel, PredictImplTest, ::testing::Bool());
+TEST_F(PredictImplTest, ThreadPoolFactory) {
+  PredictRequest request;
+  PredictResponse response;
+
+  ModelSpec* model_spec = request.mutable_model_spec();
+  model_spec->set_name(kTestModelName);
+  model_spec->mutable_version()->set_value(kTestModelVersion);
+
+  TensorProto tensor_proto;
+  tensor_proto.add_float_val(2.0);
+  tensor_proto.set_dtype(tensorflow::DT_FLOAT);
+  (*request.mutable_inputs())[kInputTensorKey] = tensor_proto;
+
+  test_util::CountingThreadPool inter_op_threadpool(Env::Default(), "InterOp",
+                                                    /*num_threads=*/1);
+  test_util::CountingThreadPool intra_op_threadpool(Env::Default(), "IntraOp",
+                                                    /*num_threads=*/1);
+  test_util::FakeThreadPoolFactoryConfig fake_thread_pool_factory_config;
+  test_util::FakeThreadPoolFactory fake_thread_pool_factory(
+      fake_thread_pool_factory_config);
+  fake_thread_pool_factory.SetInterOpThreadPool(&inter_op_threadpool);
+  fake_thread_pool_factory.SetIntraOpThreadPool(&intra_op_threadpool);
+
+  TensorflowPredictor predictor(&fake_thread_pool_factory);
+  TF_EXPECT_OK(
+      predictor.Predict(GetRunOptions(), GetServerCore(), request, &response));
+  TensorProto output_tensor_proto;
+  output_tensor_proto.add_float_val(3);
+  output_tensor_proto.set_dtype(tensorflow::DT_FLOAT);
+  output_tensor_proto.mutable_tensor_shape();
+  PredictResponse expected_response;
+  *expected_response.mutable_model_spec() = *model_spec;
+  expected_response.mutable_model_spec()->set_signature_name(
+      kDefaultServingSignatureDefKey);
+  (*expected_response.mutable_outputs())[kOutputTensorKey] =
+      output_tensor_proto;
+  EXPECT_THAT(response, test_util::EqualsProto(expected_response));
+
+  // The intra_op_threadpool doesn't have anything scheduled.
+  ASSERT_GE(inter_op_threadpool.NumScheduled(), 1);
+}
 
 }  // namespace
 }  // namespace serving

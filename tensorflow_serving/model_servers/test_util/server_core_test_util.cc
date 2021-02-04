@@ -23,7 +23,6 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/platform_config_util.h"
 #include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/test_util/test_util.h"
 
 namespace tensorflow {
@@ -40,7 +39,22 @@ void AddSessionRunLoadThreadPool(SessionBundleConfig* const bundle_config) {
   bundle_config->mutable_session_run_load_threadpool_index()->set_value(1);
 }
 
-ServerCore::Options GetDefaultOptions(const bool use_saved_model) {
+}  // namespace
+
+Status CreateServerCore(const ModelServerConfig& config,
+                        ServerCore::Options options,
+                        std::unique_ptr<ServerCore>* server_core) {
+  options.model_server_config = config;
+  return ServerCore::Create(std::move(options), server_core);
+}
+
+Status CreateServerCore(const ModelServerConfig& config,
+                        std::unique_ptr<ServerCore>* server_core) {
+  return CreateServerCore(config, ServerCoreTest::GetDefaultOptions(),
+                          server_core);
+}
+
+ServerCore::Options ServerCoreTest::GetDefaultOptions() {
   ServerCore::Options options;
   options.file_system_poll_wait_seconds = 1;
   // Reduce the number of initial load threads to be num_load_threads to avoid
@@ -58,7 +72,7 @@ ServerCore::Options GetDefaultOptions(const bool use_saved_model) {
   AddSessionRunLoadThreadPool(&bundle_config);
 
   options.platform_config_map =
-      CreateTensorFlowPlatformConfigMap(bundle_config, use_saved_model);
+      CreateTensorFlowPlatformConfigMap(bundle_config);
   ::google::protobuf::Any fake_source_adapter_config;
   fake_source_adapter_config.PackFrom(
       test_util::FakeLoaderSourceAdapterConfig());
@@ -66,21 +80,6 @@ ServerCore::Options GetDefaultOptions(const bool use_saved_model) {
         .mutable_source_adapter_config()) = fake_source_adapter_config;
 
   return options;
-}
-
-}  // namespace
-
-Status CreateServerCore(const ModelServerConfig& config,
-                        ServerCore::Options options,
-                        std::unique_ptr<ServerCore>* server_core) {
-  options.model_server_config = config;
-  return ServerCore::Create(std::move(options), server_core);
-}
-
-Status CreateServerCore(const ModelServerConfig& config,
-                        std::unique_ptr<ServerCore>* server_core) {
-  return CreateServerCore(config, GetDefaultOptions(true /*use_saved_model */),
-                          server_core);
 }
 
 ModelServerConfig ServerCoreTest::GetTestModelServerConfigForFakePlatform() {
@@ -101,7 +100,7 @@ ServerCoreTest::GetTestModelServerConfigForTensorflowPlatform() {
         "/cc/saved_model/testdata/half_plus_two"));
   } else {
     model->set_base_path(test_util::TestSrcDirPath(
-        "/servables/tensorflow/testdata/half_plus_two"));
+        "/servables/tensorflow/google/testdata/half_plus_two"));
   }
   if (PrefixPathsWithURIScheme()) {
     model->set_base_path(io::CreateURI("file", "", model->base_path()));
@@ -114,22 +113,19 @@ void ServerCoreTest::SwitchToHalfPlusTwoWith2Versions(
     ModelServerConfig* config) {
   CHECK_EQ(1, config->model_config_list().config().size());
   auto model = config->mutable_model_config_list()->mutable_config(0);
-  model->set_base_path(test_util::TestSrcDirPath(
-      "/servables/tensorflow/testdata/half_plus_two_2_versions"));
+  if (GetTestType() == SAVED_MODEL) {
+    model->set_base_path(test_util::TestSrcDirPath(
+        "/servables/tensorflow/testdata/saved_model_half_plus_two_2_versions"));
+  } else {
+    model->set_base_path(test_util::TestSrcDirPath(
+        "/servables/tensorflow/google/testdata/half_plus_two_2_versions"));
+  }
   // Request loading both versions simultaneously.
   model->clear_model_version_policy();
   model->mutable_model_version_policy()->mutable_all();
   if (PrefixPathsWithURIScheme()) {
     model->set_base_path(io::CreateURI("file", "", model->base_path()));
   }
-}
-
-ServerCore::Options ServerCoreTest::GetDefaultOptions() {
-  // Model platforms.
-  const TestType test_type = GetTestType();
-  const bool use_saved_model = test_type == SAVED_MODEL ||
-                               test_type == SAVED_MODEL_BACKWARD_COMPATIBILITY;
-  return test_util::GetDefaultOptions(use_saved_model);
 }
 
 Status ServerCoreTest::CreateServerCore(

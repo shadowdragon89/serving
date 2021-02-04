@@ -20,34 +20,19 @@ limitations under the License.
 
 #include <memory>
 
+#include "absl/types/optional.h"
 #include "tensorflow/cc/saved_model/loader.h"
-#include "tensorflow/contrib/session_bundle/session_bundle.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/threadpool_options.h"
 #include "tensorflow_serving/apis/regressor.h"
-#include "tensorflow_serving/util/optional.h"
 
 namespace tensorflow {
 namespace serving {
-
-// Create a new RegressorInterface backed by a TensorFlow Session.
-// Requires the SessionBundle manifest have a RegressionSignature
-// as the default signature.
-Status CreateRegressorFromBundle(std::unique_ptr<SessionBundle> bundle,
-                                 std::unique_ptr<RegressorInterface>* service);
 
 // Create a new RegressorInterface backed by a TensorFlow SavedModel.
 // Requires that the default SignatureDef be compatible with Regression.
 Status CreateRegressorFromSavedModelBundle(
     const RunOptions& run_options, std::unique_ptr<SavedModelBundle> bundle,
-    std::unique_ptr<RegressorInterface>* service);
-
-// Create a new RegressorInterface backed by a TensorFlow Session using the
-// specified RegressionSignature. Does not take ownership of the Session.
-// Useful in contexts where we need to avoid copying, e.g. if created per
-// request. The caller must ensure that the session and signature live at least
-// as long as the service.
-Status CreateFlyweightTensorFlowRegressor(
-    Session* session, const RegressionSignature* signature,
     std::unique_ptr<RegressorInterface>* service);
 
 // Create a new RegressorInterface backed by a TensorFlow Session using the
@@ -60,6 +45,13 @@ Status CreateFlyweightTensorFlowRegressor(
     const SignatureDef* signature,
     std::unique_ptr<RegressorInterface>* service);
 
+// Similar to the above function, but with additional 'thread_pool_options'.
+Status CreateFlyweightTensorFlowRegressor(
+    const RunOptions& run_options, Session* session,
+    const SignatureDef* signature,
+    const thread::ThreadPoolOptions& thread_pool_options,
+    std::unique_ptr<RegressorInterface>* service);
+
 // Get a regression signature from the meta_graph_def that's either:
 // 1) The signature that model_spec explicitly specifies to use.
 // 2) The default serving signature.
@@ -68,8 +60,8 @@ Status GetRegressionSignatureDef(const ModelSpec& model_spec,
                                  const MetaGraphDef& meta_graph_def,
                                  SignatureDef* signature);
 
-// Validate a SignatureDef to make sure it's compatible with Regression, and if
-// so, populate the input and output tensor names.
+// Validate a SignatureDef to make sure it's compatible with Regression.
+// Populate the input and output tensor names, if the args are not nullptr.
 //
 // NOTE: output_tensor_names may already have elements in it (e.g. when building
 // a full list of outputs from multiple signatures), and this function will just
@@ -87,9 +79,11 @@ Status PostProcessRegressionResult(
 // Creates SavedModelTensorflowRegressor and runs Regression on it.
 Status RunRegress(const RunOptions& run_options,
                   const MetaGraphDef& meta_graph_def,
-                  const optional<int64>& servable_version, Session* session,
-                  const RegressionRequest& request,
-                  RegressionResponse* response);
+                  const absl::optional<int64>& servable_version,
+                  Session* session, const RegressionRequest& request,
+                  RegressionResponse* response,
+                  const thread::ThreadPoolOptions& thread_pool_options =
+                      thread::ThreadPoolOptions());
 
 }  // namespace serving
 }  // namespace tensorflow
