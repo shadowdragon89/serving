@@ -16,13 +16,15 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/server_core.h"
 
 #include "google/protobuf/any.pb.h"
+#include "absl/strings/strip.h"
 #include "tensorflow/cc/saved_model/tag_constants.h"
-#include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/random/random.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow_serving/apis/model.pb.h"
 #include "tensorflow_serving/apis/predict.pb.h"
 #include "tensorflow_serving/core/servable_handle.h"
@@ -36,6 +38,7 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/test_util/storage_path_error_injecting_source_adapter.h"
 #include "tensorflow_serving/model_servers/test_util/storage_path_error_injecting_source_adapter.pb.h"
 #include "tensorflow_serving/test_util/test_util.h"
+#include "tensorflow_serving/util/oss_or_google.h"
 
 namespace tensorflow {
 namespace serving {
@@ -385,7 +388,7 @@ string ModelNameForPlatform(const string& platform) {
   if (it != platform_to_model_map->end()) {
     return it->second;
   }
-  const string random = strings::Printf("%llu", random::New64());
+  const string random = strings::StrCat(random::New64());
   const string model_name =
       strings::StrCat("model_", random, "_for_", platform);
   (*platform_to_model_map)[platform] = model_name;
@@ -876,16 +879,64 @@ TEST_P(ServerCoreTest, VersionLabelsNotAllowed) {
       ::testing::HasSubstr("Model version labels are not currently allowed"));
 }
 
+TEST_P(ServerCoreTest, StoragePathPrefixOption) {
+  if (PrefixPathsWithURIScheme()) {
+    return;
+  }
+  if (GetTestType() != SAVED_MODEL) {
+    return;
+  }
+
+  // Remove the path prefix from model base path in the ModelServerConfig, and
+  // add the prefix to ServerCore::Option::storage_path_prefix.
+  ModelServerConfig config = GetTestModelServerConfigForFakePlatform();
+  string base_path = config.model_config_list().config(0).base_path();
+  const string path_prefix = tensorflow::io::JoinPath(
+      getenv("TEST_SRCDIR"), "tf_serving/external/org_tensorflow/tensorflow/");
+  config.mutable_model_config_list()->mutable_config(0)->set_base_path(
+      string(absl::StripPrefix(base_path, path_prefix)));
+  ServerCore::Options options = GetDefaultOptions();
+  options.storage_path_prefix = path_prefix;
+  std::unique_ptr<ServerCore> server_core;
+  TF_ASSERT_OK(CreateServerCore(GetTestModelServerConfigForFakePlatform(),
+                                std::move(options), &server_core));
+
+  const std::vector<ServableId> available_servables =
+      server_core->ListAvailableServableIds();
+  ASSERT_EQ(available_servables.size(), 1);
+  const ServableId expected_id = {test_util::kTestModelName,
+                                  test_util::kTestModelVersion};
+  EXPECT_EQ(available_servables.at(0), expected_id);
+
+  ModelSpec model_spec;
+  model_spec.set_name(test_util::kTestModelName);
+  model_spec.mutable_version()->set_value(test_util::kTestModelVersion);
+  ServableHandle<string> servable_handle;
+  TF_ASSERT_OK(
+      server_core->GetServableHandle<string>(model_spec, &servable_handle));
+  EXPECT_EQ(servable_handle.id(), expected_id);
+}
+
 INSTANTIATE_TEST_CASE_P(
     TestType, ServerCoreTest,
     ::testing::Combine(
-        ::testing::Range(0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
+        IsTensorflowServingOSS()
+            ? ::testing::Range(
+                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL),
+                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL))
+            : ::testing::Range(
+                  0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
         ::testing::Bool()));
 
 INSTANTIATE_TEST_CASE_P(
     TestType, RelativePathsServerCoreTest,
     ::testing::Combine(
-        ::testing::Range(0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
+        IsTensorflowServingOSS()
+            ? ::testing::Range(
+                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL),
+                  static_cast<int>(test_util::ServerCoreTest::SAVED_MODEL))
+            : ::testing::Range(
+                  0, static_cast<int>(ServerCoreTest::NUM_TEST_TYPES)),
         ::testing::Bool()));
 
 }  // namespace

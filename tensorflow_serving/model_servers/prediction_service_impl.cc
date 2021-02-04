@@ -16,11 +16,13 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/prediction_service_impl.h"
 
 #include "grpc/grpc.h"
+#include "tensorflow/core/platform/threadpool_options.h"
 #include "tensorflow_serving/model_servers/grpc_status_util.h"
 #include "tensorflow_serving/servables/tensorflow/classification_service.h"
 #include "tensorflow_serving/servables/tensorflow/get_model_metadata_impl.h"
 #include "tensorflow_serving/servables/tensorflow/multi_inference_helper.h"
 #include "tensorflow_serving/servables/tensorflow/regression_service.h"
+#include "tensorflow_serving/servables/tensorflow/util.h"
 
 namespace tensorflow {
 namespace serving {
@@ -33,34 +35,49 @@ int DeadlineToTimeoutMillis(const gpr_timespec deadline) {
                    gpr_now(GPR_CLOCK_MONOTONIC)));
 }
 
+thread::ThreadPoolOptions GetThreadPoolOptions(
+    ThreadPoolFactory *thread_pool_factory) {
+  thread::ThreadPoolOptions thread_pool_options;
+  if (thread_pool_factory != nullptr) {
+    thread_pool_options.inter_op_threadpool =
+        thread_pool_factory->GetInterOpThreadPool();
+    thread_pool_options.intra_op_threadpool =
+        thread_pool_factory->GetIntraOpThreadPool();
+  }
+  return thread_pool_options;
+}
+
 }  // namespace
 
 ::grpc::Status PredictionServiceImpl::Predict(::grpc::ServerContext *context,
                                               const PredictRequest *request,
                                               PredictResponse *response) {
+  const uint64 start = Env::Default()->NowMicros();
   tensorflow::RunOptions run_options = tensorflow::RunOptions();
   if (enforce_session_run_timeout_) {
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
   }
 
-  const ::grpc::Status status =
-      ToGRPCStatus(predictor_->Predict(run_options, core_, *request, response));
+  const ::tensorflow::Status tf_status =
+      predictor_->Predict(run_options, core_, *request, response);
+  const ::grpc::Status status = ToGRPCStatus(tf_status);
 
-  if (!status.ok()) {
+  if (status.ok()) {
+    RecordRequestLatency(request->model_spec().name(), /*api=*/"Predict",
+                         /*runtime=*/"GRPC",
+                         Env::Default()->NowMicros() - start);
+  } else {
     VLOG(1) << "Predict failed: " << status.error_message();
   }
+  RecordModelRequestCount(request->model_spec().name(), tf_status);
+
   return status;
 }
 
 ::grpc::Status PredictionServiceImpl::GetModelMetadata(
     ::grpc::ServerContext *context, const GetModelMetadataRequest *request,
     GetModelMetadataResponse *response) {
-  if (!use_saved_model_) {
-    return ToGRPCStatus(
-        errors::InvalidArgument("GetModelMetadata API is only available when "
-                                "use_saved_model is set to true"));
-  }
   const ::grpc::Status status = ToGRPCStatus(
       GetModelMetadataImpl::GetModelMetadata(core_, *request, response));
   if (!status.ok()) {
@@ -72,36 +89,58 @@ int DeadlineToTimeoutMillis(const gpr_timespec deadline) {
 ::grpc::Status PredictionServiceImpl::Classify(
     ::grpc::ServerContext *context, const ClassificationRequest *request,
     ClassificationResponse *response) {
+  const uint64 start = Env::Default()->NowMicros();
   tensorflow::RunOptions run_options = tensorflow::RunOptions();
   // By default, this is infinite which is the same default as RunOptions.
   if (enforce_session_run_timeout_) {
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
   }
-  const ::grpc::Status status =
-      ToGRPCStatus(TensorflowClassificationServiceImpl::Classify(
-          run_options, core_, *request, response));
-  if (!status.ok()) {
+
+  const ::tensorflow::Status tf_status =
+      TensorflowClassificationServiceImpl::Classify(
+          run_options, core_, GetThreadPoolOptions(thread_pool_factory_),
+          *request, response);
+  const ::grpc::Status status = ToGRPCStatus(tf_status);
+
+  if (status.ok()) {
+    RecordRequestLatency(request->model_spec().name(), /*api=*/"Classify",
+                         /*runtime=*/"GRPC",
+                         Env::Default()->NowMicros() - start);
+  } else {
     VLOG(1) << "Classify request failed: " << status.error_message();
   }
+  RecordModelRequestCount(request->model_spec().name(), tf_status);
+
   return status;
 }
 
 ::grpc::Status PredictionServiceImpl::Regress(::grpc::ServerContext *context,
                                               const RegressionRequest *request,
                                               RegressionResponse *response) {
+  const uint64 start = Env::Default()->NowMicros();
   tensorflow::RunOptions run_options = tensorflow::RunOptions();
   // By default, this is infinite which is the same default as RunOptions.
   if (enforce_session_run_timeout_) {
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
   }
-  const ::grpc::Status status =
-      ToGRPCStatus(TensorflowRegressionServiceImpl::Regress(
-          run_options, core_, *request, response));
-  if (!status.ok()) {
+
+  const ::tensorflow::Status tf_status =
+      TensorflowRegressionServiceImpl::Regress(
+          run_options, core_, GetThreadPoolOptions(thread_pool_factory_),
+          *request, response);
+  const ::grpc::Status status = ToGRPCStatus(tf_status);
+
+  if (status.ok()) {
+    RecordRequestLatency(request->model_spec().name(), /*api=*/"Regress",
+                         /*runtime=*/"GRPC",
+                         Env::Default()->NowMicros() - start);
+  } else {
     VLOG(1) << "Regress request failed: " << status.error_message();
   }
+  RecordModelRequestCount(request->model_spec().name(), tf_status);
+
   return status;
 }
 
@@ -114,8 +153,9 @@ int DeadlineToTimeoutMillis(const gpr_timespec deadline) {
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
   }
-  const ::grpc::Status status = ToGRPCStatus(
-      RunMultiInferenceWithServerCore(run_options, core_, *request, response));
+  const ::grpc::Status status = ToGRPCStatus(RunMultiInferenceWithServerCore(
+      run_options, core_, GetThreadPoolOptions(thread_pool_factory_), *request,
+      response));
   if (!status.ok()) {
     VLOG(1) << "MultiInference request failed: " << status.error_message();
   }

@@ -23,11 +23,12 @@ limitations under the License.
 #include "google/protobuf/wrappers.pb.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "tensorflow/contrib/session_bundle/session_bundle.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/kernels/batching_util/shared_batch_scheduler.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/public/session_options.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "tensorflow_serving/resources/resources.pb.h"
 #include "tensorflow_serving/servables/tensorflow/bundle_factory_test_util.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
+#include "tensorflow_serving/session_bundle/session_bundle_util.h"
 #include "tensorflow_serving/test_util/test_util.h"
 #include "tensorflow_serving/util/test_util/mock_file_probing_env.h"
 
@@ -44,16 +46,12 @@ namespace serving {
 namespace {
 
 using test_util::EqualsProto;
-using ::testing::_;
-using ::testing::DoAll;
-using ::testing::Return;
-using ::testing::SetArgPointee;
+
 using Batcher = SharedBatchScheduler<BatchingSessionTask>;
 
 class BundleFactoryUtilTest : public ::testing::Test {
  protected:
-  BundleFactoryUtilTest()
-      : export_dir_(test_util::GetTestSessionBundleExportPath()) {}
+  BundleFactoryUtilTest() : export_dir_(test_util::GetTestSavedModelPath()) {}
 
   virtual ~BundleFactoryUtilTest() = default;
 
@@ -86,23 +84,17 @@ TEST_F(BundleFactoryUtilTest, GetRunOptions) {
 }
 
 TEST_F(BundleFactoryUtilTest, WrapSession) {
-  // Create a SessionBundle and wrap the session.
-  // TODO(b/32248363): use SavedModelBundle instead of SessionBundle when we
-  // switch the Model Server to use Saved Model.
-  SessionBundle bundle;
-  TF_ASSERT_OK(LoadSessionBundleFromPathUsingRunOptions(
-      SessionOptions(), RunOptions(), export_dir_, &bundle));
+  SavedModelBundle bundle;
+  TF_ASSERT_OK(LoadSavedModel(SessionOptions(), RunOptions(), export_dir_,
+                              {"serve"}, &bundle));
   TF_ASSERT_OK(WrapSession(&bundle.session));
   test_util::TestSingleRequest(bundle.session.get());
 }
 
 TEST_F(BundleFactoryUtilTest, WrapSessionForBatching) {
-  // Create a SessionBundle.
-  // TODO(b/32248363): use SavedModelBundle instead of SessionBundle when we
-  // switch the Model Server to use Saved Model.
-  SessionBundle bundle;
-  TF_ASSERT_OK(LoadSessionBundleFromPathUsingRunOptions(
-      SessionOptions(), RunOptions(), export_dir_, &bundle));
+  SavedModelBundle bundle;
+  TF_ASSERT_OK(LoadSavedModel(SessionOptions(), RunOptions(), export_dir_,
+                              {"serve"}, &bundle));
 
   // Create BatchingParameters and batch scheduler.
   BatchingParameters batching_params;
@@ -134,47 +126,49 @@ TEST_F(BundleFactoryUtilTest, BatchingConfigError) {
 
 TEST_F(BundleFactoryUtilTest, EstimateResourceFromPathWithBadExport) {
   ResourceAllocation resource_requirement;
-  const Status status =
-      EstimateResourceFromPath("/a/bogus/export/dir", &resource_requirement);
+  const Status status = EstimateResourceFromPath(
+      "/a/bogus/export/dir",
+      /*use_validation_result=*/false, &resource_requirement);
   EXPECT_FALSE(status.ok());
 }
 
 TEST_F(BundleFactoryUtilTest, EstimateResourceFromPathWithGoodExport) {
-  const double kTotalFileSize =
-      test_util::GetTotalFileSize(test_util::GetTestSessionBundleExportFiles());
+  const double kTotalFileSize = test_util::GetTotalFileSize(
+      test_util::GetTestSavedModelBundleExportFiles());
   ResourceAllocation expected =
       test_util::GetExpectedResourceEstimate(kTotalFileSize);
 
   ResourceAllocation actual;
-  TF_ASSERT_OK(EstimateResourceFromPath(export_dir_, &actual));
+  TF_ASSERT_OK(EstimateResourceFromPath(
+      export_dir_, /*use_validation_result=*/false, &actual));
   EXPECT_THAT(actual, EqualsProto(expected));
 }
 
-TEST_F(BundleFactoryUtilTest, EstimateResourceFromPathWithFileProbingEnv) {
-  const string export_dir = "/foo/bar";
-  const string child = "child";
-  const string child_path = io::JoinPath(export_dir, child);
-  const double file_size = 100;
+#ifdef PLATFORM_GOOGLE
+// This benchmark relies on https://github.com/google/benchmark features,
+// not available in open-sourced TF codebase.
 
-  // Set up the expectation that the directory contains exactly one child with
-  // the given file size.
-  test_util::MockFileProbingEnv env;
-  EXPECT_CALL(env, FileExists(export_dir)).WillRepeatedly(Return(Status::OK()));
-  EXPECT_CALL(env, GetChildren(export_dir, _))
-      .WillRepeatedly(DoAll(SetArgPointee<1>(std::vector<string>({child})),
-                            Return(Status::OK())));
-  EXPECT_CALL(env, IsDirectory(child_path))
-      .WillRepeatedly(Return(errors::FailedPrecondition("")));
-  EXPECT_CALL(env, GetFileSize(child_path, _))
-      .WillRepeatedly(DoAll(SetArgPointee<1>(file_size), Return(Status::OK())));
-
-  ResourceAllocation actual;
-  TF_ASSERT_OK(EstimateResourceFromPath(export_dir, &env, &actual));
-
-  ResourceAllocation expected =
-      test_util::GetExpectedResourceEstimate(file_size);
-  EXPECT_THAT(actual, EqualsProto(expected));
+void BM_HalfPlusTwo(benchmark::State& state) {
+  static Session* session;
+  if (state.thread_index() == 0) {
+    SavedModelBundle bundle;
+    TF_ASSERT_OK(LoadSavedModel(SessionOptions(), RunOptions(),
+                                test_util::GetTestSavedModelPath(), {"serve"},
+                                &bundle));
+    TF_ASSERT_OK(WrapSession(&bundle.session));
+    session = bundle.session.release();
+  }
+  Tensor input = test::AsTensor<float>({1.0, 2.0, 3.0}, TensorShape({3}));
+  std::vector<Tensor> outputs;
+  testing::UseRealTime();
+  for (auto _ : state) {
+    outputs.clear();
+    TF_ASSERT_OK(session->Run({{"x:0", input}}, {"y:0"}, {}, &outputs));
+  }
 }
+BENCHMARK(BM_HalfPlusTwo)->ThreadRange(1, 64);
+
+#endif  // PLATFORM_GOOGLE
 
 }  // namespace
 }  // namespace serving

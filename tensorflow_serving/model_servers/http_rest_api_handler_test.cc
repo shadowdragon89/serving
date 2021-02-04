@@ -39,7 +39,6 @@ limitations under the License.
 #include "tensorflow_serving/model_servers/server_core.h"
 #include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/test_util/test_util.h"
 
 namespace tensorflow {
@@ -54,6 +53,8 @@ constexpr char kTestModelBasePath[] = "cc/saved_model/testdata/half_plus_two";
 constexpr char kTestModelName[] = "saved_model_half_plus_two_2_versions";
 constexpr char kNonexistentModelName[] = "nonexistent_model";
 constexpr int kTestModelVersion1 = 123;
+constexpr char kTestModelVersionLabel[] = "Version_Label";
+constexpr char kNonexistentModelVersionLabel[] = "Version_Nonexistent";
 
 using HeaderList = std::vector<std::pair<string, string>>;
 
@@ -95,14 +96,19 @@ class HttpRestApiHandlerTest : public ::testing::Test {
     ServerCore::Options options;
     options.model_server_config = config;
 
-    options.platform_config_map = CreateTensorFlowPlatformConfigMap(
-        SessionBundleConfig(), true /* use_saved_model */);
+    options.platform_config_map =
+        CreateTensorFlowPlatformConfigMap(SessionBundleConfig());
     // Reduce the number of initial load threads to be num_load_threads to avoid
     // timing out in tests.
     options.num_initial_load_threads = options.num_load_threads;
     options.aspired_version_policy =
         std::unique_ptr<AspiredVersionPolicy>(new AvailabilityPreservingPolicy);
-    return ServerCore::Create(std::move(options), server_core);
+    TF_RETURN_IF_ERROR(ServerCore::Create(std::move(options), server_core));
+
+    // Reload config with version labels map
+    (*model_config->mutable_version_labels())[kTestModelVersionLabel] =
+        kTestModelVersion1;
+    return server_core->get()->ReloadConfig(config);
   }
 
   string GetJsonErrorMsg(const string& json) {
@@ -168,41 +174,46 @@ TEST_F(HttpRestApiHandlerTest, kPathRegex) {
 
 TEST_F(HttpRestApiHandlerTest, UnsupportedApiCalls) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
-  status = handler_.ProcessRequest("GET", "/v1/foo", "", &headers, &output);
+  status = handler_.ProcessRequest("GET", "/v1/foo", "", &headers, &model_name,
+                                   &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
-  status = handler_.ProcessRequest("POST", "/v1/foo", "", &headers, &output);
+  status = handler_.ProcessRequest("POST", "/v1/foo", "", &headers, &model_name,
+                                   &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
-  status = handler_.ProcessRequest("GET", "/v1/models", "", &headers, &output);
+  status = handler_.ProcessRequest("GET", "/v1/models", "", &headers,
+                                   &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Missing model name"));
 
-  status = handler_.ProcessRequest("POST", "/v1/models", "", &headers, &output);
+  status = handler_.ProcessRequest("POST", "/v1/models", "", &headers,
+                                   &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("GET", "/v1/models/foo:predict", "",
-                                   &headers, &output);
+                                   &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("GET", "/v1/models/foo/version/50:predict",
-                                   "", &headers, &output);
+                                   "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
   status = handler_.ProcessRequest("POST", "/v1/models/foo/version/50:regress",
-                                   "", &headers, &output);
+                                   "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
-  status = handler_.ProcessRequest(
-      "POST", "/v1/models/foo/versions/HELLO:regress", "", &headers, &output);
+  status =
+      handler_.ProcessRequest("POST", "/v1/models/foo/versions/HELLO:regress",
+                              "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 
@@ -210,74 +221,120 @@ TEST_F(HttpRestApiHandlerTest, UnsupportedApiCalls) {
       "POST",
       absl::StrCat("/v1/models/foo/versions/",
                    std::numeric_limits<uint64>::max(), ":regress"),
-      "", &headers, &output);
+      "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Failed to convert version"));
 
   status = handler_.ProcessRequest("POST", "/v1/models/foo/metadata", "",
-                                   &headers, &output);
+                                   &headers, &model_name, &method, &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+
+  status =
+      handler_.ProcessRequest("POST", "/v1/models/foo/label/some_label:regress",
+                              "", &headers, &model_name, &method, &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+
+  status = handler_.ProcessRequest(
+      "POST", "/v1/models/foo/versions/50/labels/some_label:regress", "",
+      &headers, &model_name, &method, &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+
+  status = handler_.ProcessRequest("POST",
+                                   "/v1/models/foo/labels/some-label:regress",
+                                   "", &headers, &model_name, &method, &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
+
+  status = handler_.ProcessRequest("POST",
+                                   "/v1/models/foo/versions/some_label:regress",
+                                   "", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("Malformed request"));
 }
 
 TEST_F(HttpRestApiHandlerTest, PredictModelNameVersionErrors) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
   // 'foo' is not a valid model name.
-  status =
-      handler_.ProcessRequest("POST", "/v1/models/foo:predict",
-                              R"({ "instances": [1] })", &headers, &output);
+  status = handler_.ProcessRequest("POST", "/v1/models/foo:predict",
+                                   R"({ "instances": [1] })", &headers,
+                                   &model_name, &method, &output);
   EXPECT_TRUE(errors::IsNotFound(status));
 
   // 'foo' is not a valid model name.
-  status =
-      handler_.ProcessRequest("POST", "/v1/models/foo/versions/50:predict",
-                              R"({ "instances": [1] })", &headers, &output);
+  status = handler_.ProcessRequest("POST", "/v1/models/foo/versions/50:predict",
+                                   R"({ "instances": [1] })", &headers,
+                                   &model_name, &method, &output);
   EXPECT_TRUE(errors::IsNotFound(status));
 
   // Valid model name, but invalid version number (99).
   status = handler_.ProcessRequest(
       "POST", absl::StrCat("/v1/models/", kTestModelName, "99:predict"),
-      R"({ "instances": [1] })", &headers, &output);
+      R"({ "instances": [1] })", &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsNotFound(status));
 }
 
 TEST_F(HttpRestApiHandlerTest, PredictRequestErrors) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
   const string& req_path =
       absl::StrCat("/v1/models/", kTestModelName, ":predict");
 
   // Empty document.
-  status = handler_.ProcessRequest("POST", req_path, "", &headers, &output);
+  status = handler_.ProcessRequest("POST", req_path, "", &headers, &model_name,
+                                   &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(),
               HasSubstr("JSON Parse error: The document is empty"));
 
   // Badly formatted JSON.
   status = handler_.ProcessRequest("POST", req_path, "instances = [1, 2]",
-                                   &headers, &output);
+                                   &headers, &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(),
               HasSubstr("JSON Parse error: Invalid value"));
 
   // Incorrect type.
-  status = handler_.ProcessRequest(
-      "POST", req_path, R"({ "instances": ["x", "y"] })", &headers, &output);
+  status = handler_.ProcessRequest("POST", req_path,
+                                   R"({ "instances": ["x", "y"] })", &headers,
+                                   &model_name, &method, &output);
   EXPECT_TRUE(errors::IsInvalidArgument(status));
   EXPECT_THAT(status.error_message(), HasSubstr("not of expected type: float"));
+
+  // Nonexistent version label.
+  status = handler_.ProcessRequest(
+      "POST",
+      absl::StrCat("/v1/models/", kTestModelName, "/labels/",
+                   kNonexistentModelVersionLabel, ":predict"),
+      R"({ "instances": ["x", "y"] })", &headers, &model_name, &method,
+      &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("Unrecognized servable version label"));
+
+  // Incorrect signature_name type.
+  status =
+      handler_.ProcessRequest("POST", req_path, R"({ "signature_name": 100 })",
+                              &headers, &model_name, &method, &output);
+  EXPECT_TRUE(errors::IsInvalidArgument(status));
+  EXPECT_THAT(GetJsonErrorMsg(output),
+              HasSubstr("'signature_name' key must be a string value."));
 }
 
 TEST_F(HttpRestApiHandlerTest, Predict) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
   // Query latest version.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "POST", absl::StrCat("/v1/models/", kTestModelName, ":predict"),
-      R"({"instances": [[1.0, 2.0], [3.0, 4.0]]})", &headers, &output));
+      R"({"instances": [[1.0, 2.0], [3.0, 4.0]]})", &headers, &model_name,
+      &method, &output));
   TF_EXPECT_OK(
       CompareJson(output, R"({ "predictions": [[2.5, 3.0], [3.5, 4.0]] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
@@ -288,7 +345,17 @@ TEST_F(HttpRestApiHandlerTest, Predict) {
       "POST",
       absl::StrCat("/v1/models/", kTestModelName, "/versions/",
                    kTestModelVersion1, ":predict"),
-      R"({"instances": [1.0, 2.0]})", &headers, &output));
+      R"({"instances": [1.0, 2.0]})", &headers, &model_name, &method, &output));
+  TF_EXPECT_OK(CompareJson(output, R"({ "predictions": [2.5, 3.0] })"));
+  EXPECT_THAT(headers, UnorderedElementsAreArray(
+                           (HeaderList){{"Content-Type", "application/json"}}));
+
+  // Query specific versions using a version label.
+  TF_EXPECT_OK(handler_.ProcessRequest(
+      "POST",
+      absl::StrCat("/v1/models/", kTestModelName, "/labels/",
+                   kTestModelVersionLabel, ":predict"),
+      R"({"instances": [1.0, 2.0]})", &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "predictions": [2.5, 3.0] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -299,7 +366,7 @@ TEST_F(HttpRestApiHandlerTest, Predict) {
       absl::StrCat("/v1/models/", kTestModelName, "/versions/",
                    kTestModelVersion1, ":predict"),
       R"({"signature_name": "serving_default", "instances": [3.0, 4.0]})",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "predictions": [3.5, 4.0] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -310,7 +377,7 @@ TEST_F(HttpRestApiHandlerTest, Predict) {
       absl::StrCat("/v1/models/", kTestModelName, "/versions/",
                    kTestModelVersion1, ":predict"),
       R"({"signature_name": "serving_default", "inputs": [3.0, 4.0]})",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "outputs": [3.5, 4.0] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -318,13 +385,13 @@ TEST_F(HttpRestApiHandlerTest, Predict) {
 
 TEST_F(HttpRestApiHandlerTest, Regress) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
   // Query latest version.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "POST", absl::StrCat("/v1/models/", kTestModelName, ":regress"),
       R"({"signature_name": "regress_x_to_y", "examples": [ { "x": 80.0 } ] })",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "results": [42] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -335,7 +402,18 @@ TEST_F(HttpRestApiHandlerTest, Regress) {
       absl::StrCat("/v1/models/", kTestModelName, "/versions/",
                    kTestModelVersion1, ":regress"),
       R"({"signature_name": "regress_x_to_y", "examples": [ { "x": 80.0 } ] })",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
+  TF_EXPECT_OK(CompareJson(output, R"({ "results": [42] })"));
+  EXPECT_THAT(headers, UnorderedElementsAreArray(
+                           (HeaderList){{"Content-Type", "application/json"}}));
+
+  // Query specific versions using a version label.
+  TF_EXPECT_OK(handler_.ProcessRequest(
+      "POST",
+      absl::StrCat("/v1/models/", kTestModelName, "/labels/",
+                   kTestModelVersionLabel, ":regress"),
+      R"({"signature_name": "regress_x_to_y", "examples": [ { "x": 80.0 } ] })",
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "results": [42] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -343,24 +421,24 @@ TEST_F(HttpRestApiHandlerTest, Regress) {
 
 TEST_F(HttpRestApiHandlerTest, Classify) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
   // Query latest version.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "POST", absl::StrCat("/v1/models/", kTestModelName, ":classify"),
       R"({"signature_name": "classify_x_to_y", "examples": [ { "x": 20.0 } ] })",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "results": [[["", 12]]] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
 
-  // Query specific versions.
+  // Query specific versions using a version label.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "POST",
-      absl::StrCat("/v1/models/", kTestModelName, "/versions/",
-                   kTestModelVersion1, ":classify"),
+      absl::StrCat("/v1/models/", kTestModelName, "/labels/",
+                   kTestModelVersionLabel, ":classify"),
       R"({"signature_name": "classify_x_to_y", "examples": [ { "x": 10.0 } ] })",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   TF_EXPECT_OK(CompareJson(output, R"({ "results": [[["", 7]]] })"));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
@@ -368,13 +446,13 @@ TEST_F(HttpRestApiHandlerTest, Classify) {
 
 TEST_F(HttpRestApiHandlerTest, GetStatus) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   Status status;
 
   // Get status for all versions.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "GET", absl::StrCat("/v1/models/", kTestModelName), "", &headers,
-      &output));
+      &model_name, &method, &output));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
   TF_EXPECT_OK(CompareJson(output, R"({
@@ -395,7 +473,28 @@ TEST_F(HttpRestApiHandlerTest, GetStatus) {
       handler_.ProcessRequest("GET",
                               absl::StrCat("/v1/models/", kTestModelName,
                                            "/versions/", kTestModelVersion1),
-                              "", &headers, &output));
+                              "", &headers, &model_name, &method, &output));
+  EXPECT_THAT(headers, UnorderedElementsAreArray(
+                           (HeaderList){{"Content-Type", "application/json"}}));
+  TF_EXPECT_OK(CompareJson(output, R"({
+     "model_version_status": [
+      {
+       "version": "123",
+       "state": "AVAILABLE",
+       "status": {
+       "error_code": "OK",
+       "error_message": ""
+       }
+      }
+     ]
+    })"));
+
+  // Get status of specific version using a version label.
+  TF_EXPECT_OK(
+      handler_.ProcessRequest("GET",
+                              absl::StrCat("/v1/models/", kTestModelName,
+                                           "/labels/", kTestModelVersionLabel),
+                              "", &headers, &model_name, &method, &output));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
   TF_EXPECT_OK(CompareJson(output, R"({
@@ -414,13 +513,13 @@ TEST_F(HttpRestApiHandlerTest, GetStatus) {
 
 TEST_F(HttpRestApiHandlerTest, GetModelMetadata) {
   HeaderList headers;
-  string output;
+  string model_name, method, output;
   string test_file_contents;
 
   // Get model metadata without specifying version.
   TF_EXPECT_OK(handler_.ProcessRequest(
       "GET", absl::StrCat("/v1/models/", kTestModelName, "/metadata"), "",
-      &headers, &output));
+      &headers, &model_name, &method, &output));
   EXPECT_THAT(headers, UnorderedElementsAreArray(
                            (HeaderList){{"Content-Type", "application/json"}}));
   const string fname = absl::StrCat(

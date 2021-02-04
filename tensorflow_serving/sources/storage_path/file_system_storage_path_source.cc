@@ -217,10 +217,11 @@ Status PollFileSystemForServable(
   // we don't emit an empty aspired-versions list for a non-existent (or
   // transiently unavailable) base-path. (On some platforms, GetChildren()
   // returns an empty list instead of erring if the base path isn't found.)
-  if (!Env::Default()->FileExists(servable.base_path()).ok()) {
-    return errors::InvalidArgument("Could not find base path ",
-                                   servable.base_path(), " for servable ",
-                                   servable.servable_name());
+  Status status = Env::Default()->FileExists(servable.base_path());
+  if (!status.ok()) {
+    return errors::InvalidArgument(
+        "Could not find base path ", servable.base_path(), " for servable ",
+        servable.servable_name(), " with error ", status.ToString());
   }
 
   // Retrieve a list of base-path children from the file system.
@@ -265,7 +266,9 @@ Status PollFileSystemForServable(
 
   if (!at_least_one_version_found) {
     LOG(WARNING) << "No versions of servable " << servable.servable_name()
-                 << " found under base path " << servable.base_path();
+                 << " found under base path " << servable.base_path()
+                 << ". Did you forget to name your leaf directory as a number "
+                    "(eg. '/1/')?";
   }
 
   return Status::OK();

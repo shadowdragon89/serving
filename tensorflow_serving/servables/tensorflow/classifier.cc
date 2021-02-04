@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow_serving/servables/tensorflow/classifier.h"
 
 #include <stddef.h>
+
 #include <algorithm>
 #include <functional>
 #include <memory>
@@ -23,12 +24,13 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/cc/saved_model/signature_constants.h"
-#include "tensorflow/contrib/session_bundle/signature.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/threadpool.h"
+#include "tensorflow/core/platform/threadpool_options.h"
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow_serving/apis/classification.pb.h"
@@ -41,125 +43,18 @@ namespace tensorflow {
 namespace serving {
 namespace {
 
-// Implementation of the ClassificationService using the legacy SessionBundle
-// ClassificationSignature signature format.
-class TensorFlowClassifier : public ClassifierInterface {
- public:
-  explicit TensorFlowClassifier(Session* session,
-                                const ClassificationSignature* signature)
-      : session_(session), signature_(signature) {}
-
-  Status Classify(const ClassificationRequest& request,
-                  ClassificationResult* result) override {
-    TRACELITERAL("TensorFlowClassifier::Classify");
-    TRACELITERAL("ConvertInputTFEXamplesToTensor");
-    // Setup the input Tensor to be a vector of string containing the serialized
-    // tensorflow.Example.
-    Tensor input_tensor;
-    TF_RETURN_IF_ERROR(
-        InputToSerializedExampleTensor(request.input(), &input_tensor));
-
-    const int num_examples = input_tensor.dim_size(0);
-    if (num_examples == 0) {
-      return errors::InvalidArgument("ClassificationRequest::input is empty.");
-    }
-    RecordRequestExampleCount(request.model_spec().name(), num_examples);
-
-    TRACELITERAL("RunClassification");
-    // Support serving models that return classes, scores or both.
-    std::unique_ptr<Tensor> classes;
-    if (!signature_->classes().tensor_name().empty()) {
-      classes.reset(new Tensor);
-    }
-    std::unique_ptr<Tensor> scores;
-    if (!signature_->scores().tensor_name().empty()) {
-      scores.reset(new Tensor);
-    }
-
-    TF_RETURN_IF_ERROR(RunClassification(*signature_, input_tensor, session_,
-                                         classes.get(), scores.get()));
-
-    // Validate classes output Tensor.
-    if (classes) {
-      if (classes->dims() != 2) {
-        return errors::InvalidArgument(
-            "Expected Tensor shape: [batch_size num_classes] but got ",
-            classes->shape().DebugString());
-      }
-      if (classes->dtype() != DT_STRING) {
-        return errors::Internal("Expected classes Tensor of DT_STRING.  Got: ",
-                                DataType_Name(classes->dtype()));
-      }
-      if (classes->dim_size(0) != num_examples) {
-        return errors::Internal("Expected output batch size of ", num_examples,
-                                ". Got: ", classes->dim_size(0));
-      }
-    }
-    // Validate scores output Tensor.
-    if (scores) {
-      if (scores->dims() != 2) {
-        return errors::InvalidArgument(
-            "Expected Tensor shape: [batch_size num_classes] but got ",
-            scores->shape().DebugString());
-      }
-      if (scores->dtype() != DT_FLOAT) {
-        return errors::Internal("Expected scores Tensor of DT_FLOAT.  Got: ",
-                                DataType_Name(scores->dtype()));
-      }
-      if (scores->dim_size(0) != num_examples) {
-        return errors::Internal("Expected output batch size of ", num_examples,
-                                ". Got: ", scores->dim_size(0));
-      }
-    }
-    // Extract the number of classes from either the class or score output
-    // Tensor.
-    int num_classes = 0;
-    if (classes && scores) {
-      // If we have both Tensors they should agree in the second dimmension.
-      if (classes->dim_size(1) != scores->dim_size(1)) {
-        return errors::Internal(
-            "Tensors class and score should match in dim_size(1). Got ",
-            classes->dim_size(1), " vs. ", scores->dim_size(1));
-      }
-      num_classes = classes->dim_size(1);
-    } else if (classes) {
-      num_classes = classes->dim_size(1);
-    } else if (scores) {
-      num_classes = scores->dim_size(1);
-    }
-
-    TRACELITERAL("ConvertToClassificationResult");
-    // Convert the output to ClassificationResult format.
-    for (int i = 0; i < num_examples; ++i) {
-      serving::Classifications* classifications = result->add_classifications();
-      for (int c = 0; c < num_classes; ++c) {
-        serving::Class* cl = classifications->add_classes();
-        if (classes) {
-          cl->set_label((classes->matrix<string>())(i, c));
-        }
-        if (scores) {
-          cl->set_score((scores->matrix<float>())(i, c));
-        }
-      }
-    }
-
-    return Status::OK();
-  }
-
- private:
-  Session* const session_;
-  const ClassificationSignature* const signature_;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorFlowClassifier);
-};
-
 // Implementation of the ClassifierInterface using SavedModel.
 class SavedModelTensorFlowClassifier : public ClassifierInterface {
  public:
-  explicit SavedModelTensorFlowClassifier(const RunOptions& run_options,
-                                          Session* session,
-                                          const SignatureDef* const signature)
-      : run_options_(run_options), session_(session), signature_(signature) {}
+  explicit SavedModelTensorFlowClassifier(
+      const RunOptions& run_options, Session* session,
+      const SignatureDef* const signature,
+      const thread::ThreadPoolOptions& thread_pool_options =
+          thread::ThreadPoolOptions())
+      : run_options_(run_options),
+        session_(session),
+        signature_(signature),
+        thread_pool_options_(thread_pool_options) {}
 
   ~SavedModelTensorFlowClassifier() override = default;
 
@@ -174,9 +69,13 @@ class SavedModelTensorFlowClassifier : public ClassifierInterface {
 
     std::vector<Tensor> outputs;
     int num_examples;
+    int64 runtime_latency;
     TF_RETURN_IF_ERROR(PerformOneShotTensorComputation(
         run_options_, request.input(), input_tensor_name, output_tensor_names,
-        session_, &outputs, &num_examples));
+        session_, &outputs, &num_examples, thread_pool_options_,
+        &runtime_latency));
+    RecordRuntimeLatency(request.model_spec().name(), /*api=*/"Classify",
+                         /*runtime=*/"TF1", runtime_latency);
 
     TRACELITERAL("ConvertToClassificationResult");
     return PostProcessClassificationResult(
@@ -187,36 +86,9 @@ class SavedModelTensorFlowClassifier : public ClassifierInterface {
   const RunOptions run_options_;
   Session* const session_;
   const SignatureDef* const signature_;
+  const thread::ThreadPoolOptions thread_pool_options_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(SavedModelTensorFlowClassifier);
-};
-
-// Implementation of the ClassificationService.
-class SessionBundleClassifier : public ClassifierInterface {
- public:
-  explicit SessionBundleClassifier(std::unique_ptr<SessionBundle> bundle)
-      : bundle_(std::move(bundle)) {}
-
-  ~SessionBundleClassifier() override = default;
-
-  Status Classify(const ClassificationRequest& request,
-                  ClassificationResult* result) override {
-    // Get the default signature of the graph.  Expected to be a
-    // classification signature.
-    // TODO(b/26220896): Move TensorFlowClassifier creation to construction
-    // time.
-    ClassificationSignature signature;
-    TF_RETURN_IF_ERROR(
-        GetClassificationSignature(bundle_->meta_graph_def, &signature));
-
-    TensorFlowClassifier classifier(bundle_->session.get(), &signature);
-    return classifier.Classify(request, result);
-  }
-
- private:
-  std::unique_ptr<SessionBundle> bundle_;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(SessionBundleClassifier);
 };
 
 class SavedModelClassifier : public ClassifierInterface {
@@ -250,13 +122,6 @@ class SavedModelClassifier : public ClassifierInterface {
 
 }  // namespace
 
-Status CreateClassifierFromBundle(
-    std::unique_ptr<SessionBundle> bundle,
-    std::unique_ptr<ClassifierInterface>* service) {
-  service->reset(new SessionBundleClassifier(std::move(bundle)));
-  return Status::OK();
-}
-
 Status CreateClassifierFromSavedModelBundle(
     const RunOptions& run_options, std::unique_ptr<SavedModelBundle> bundle,
     std::unique_ptr<ClassifierInterface>* service) {
@@ -265,18 +130,20 @@ Status CreateClassifierFromSavedModelBundle(
 }
 
 Status CreateFlyweightTensorFlowClassifier(
-    Session* session, const ClassificationSignature* const signature,
+    const RunOptions& run_options, Session* session,
+    const SignatureDef* signature,
     std::unique_ptr<ClassifierInterface>* service) {
-  service->reset(new TensorFlowClassifier(session, signature));
-  return Status::OK();
+  return CreateFlyweightTensorFlowClassifier(
+      run_options, session, signature, thread::ThreadPoolOptions(), service);
 }
 
 Status CreateFlyweightTensorFlowClassifier(
     const RunOptions& run_options, Session* session,
     const SignatureDef* signature,
+    const thread::ThreadPoolOptions& thread_pool_options,
     std::unique_ptr<ClassifierInterface>* service) {
-  service->reset(
-      new SavedModelTensorFlowClassifier(run_options, session, signature));
+  service->reset(new SavedModelTensorFlowClassifier(
+      run_options, session, signature, thread_pool_options));
   return Status::OK();
 }
 
@@ -291,10 +158,15 @@ Status GetClassificationSignatureDef(const ModelSpec& model_spec,
     return errors::InvalidArgument(strings::StrCat(
         "No signature was found with the name: ", signature_name));
   }
-  if (iter->second.method_name() != kClassifyMethodName) {
-    return errors::InvalidArgument(strings::StrCat(
-        "Expected classification signature method_name to be ",
-        kClassifyMethodName, ". Was: ", iter->second.method_name()));
+  if (GetSignatureMethodNameCheckFeature()) {
+    if (iter->second.method_name() != kClassifyMethodName) {
+      return errors::InvalidArgument(strings::StrCat(
+          "Expected classification signature method_name to be ",
+          kClassifyMethodName, ". Was: ", iter->second.method_name()));
+    }
+  } else {
+    TF_RETURN_IF_ERROR(
+        PreProcessClassification(iter->second, nullptr, nullptr));
   }
   *signature = iter->second;
   return Status::OK();
@@ -303,7 +175,8 @@ Status GetClassificationSignatureDef(const ModelSpec& model_spec,
 Status PreProcessClassification(const SignatureDef& signature,
                                 string* input_tensor_name,
                                 std::vector<string>* output_tensor_names) {
-  if (signature.method_name() != kClassifyMethodName) {
+  if (GetSignatureMethodNameCheckFeature() &&
+      signature.method_name() != kClassifyMethodName) {
     return errors::InvalidArgument(strings::StrCat(
         "Expected classification signature method_name to be ",
         kClassifyMethodName, ". Was: ", signature.method_name()));
@@ -320,26 +193,30 @@ Status PreProcessClassification(const SignatureDef& signature,
 
   auto input_iter = signature.inputs().find(kClassifyInputs);
   if (input_iter == signature.inputs().end()) {
-    return errors::FailedPrecondition(
+    return errors::InvalidArgument(
         "No classification inputs found in SignatureDef: ",
         signature.DebugString());
   }
-  *input_tensor_name = input_iter->second.name();
+  if (input_tensor_name != nullptr) {
+    *input_tensor_name = input_iter->second.name();
+  }
 
   auto classes_iter = signature.outputs().find(kClassifyOutputClasses);
   auto scores_iter = signature.outputs().find(kClassifyOutputScores);
   if (classes_iter == signature.outputs().end() &&
       scores_iter == signature.outputs().end()) {
-    return errors::FailedPrecondition(strings::StrCat(
+    return errors::InvalidArgument(strings::StrCat(
         "Expected classification signature outputs to contain at least one of ",
         "\"", kClassifyOutputClasses, "\" or \"", kClassifyOutputScores,
         "\". Signature was: ", signature.DebugString()));
   }
-  if (classes_iter != signature.outputs().end()) {
-    output_tensor_names->push_back(classes_iter->second.name());
-  }
-  if (scores_iter != signature.outputs().end()) {
-    output_tensor_names->push_back(scores_iter->second.name());
+  if (output_tensor_names != nullptr) {
+    if (classes_iter != signature.outputs().end()) {
+      output_tensor_names->push_back(classes_iter->second.name());
+    }
+    if (scores_iter != signature.outputs().end()) {
+      output_tensor_names->push_back(scores_iter->second.name());
+    }
   }
   return Status::OK();
 }
@@ -434,7 +311,8 @@ Status PostProcessClassificationResult(
     for (int c = 0; c < num_classes; ++c) {
       serving::Class* cl = classifications->add_classes();
       if (classes) {
-        cl->set_label((classes->matrix<string>())(i, c));
+        const tstring& class_tstr = (classes->matrix<tstring>())(i, c);
+        cl->set_label(class_tstr.data(), class_tstr.size());
       }
       if (scores) {
         cl->set_score((scores->matrix<float>())(i, c));
@@ -446,16 +324,18 @@ Status PostProcessClassificationResult(
 
 Status RunClassify(const RunOptions& run_options,
                    const MetaGraphDef& meta_graph_def,
-                   const optional<int64>& servable_version, Session* session,
-                   const ClassificationRequest& request,
-                   ClassificationResponse* response) {
+                   const absl::optional<int64>& servable_version,
+                   Session* session, const ClassificationRequest& request,
+                   ClassificationResponse* response,
+                   const thread::ThreadPoolOptions& thread_pool_options) {
   SignatureDef signature;
   TF_RETURN_IF_ERROR(GetClassificationSignatureDef(request.model_spec(),
                                                    meta_graph_def, &signature));
 
   std::unique_ptr<ClassifierInterface> classifier_interface;
   TF_RETURN_IF_ERROR(CreateFlyweightTensorFlowClassifier(
-      run_options, session, &signature, &classifier_interface));
+      run_options, session, &signature, thread_pool_options,
+      &classifier_interface));
 
   MakeModelSpec(request.model_spec().name(),
                 request.model_spec().signature_name(), servable_version,

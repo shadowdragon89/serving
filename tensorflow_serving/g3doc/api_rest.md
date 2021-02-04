@@ -27,11 +27,11 @@ gRPC API. It returns the status of a model in the ModelServer.
 ### URL
 
 ```
-GET http://host:port/v1/models/${MODEL_NAME}[/versions/${MODEL_VERSION}]
+GET http://host:port/v1/models/${MODEL_NAME}[/versions/${VERSION}|/labels/${LABEL}]
 ```
 
-`/versions/${MODEL_VERSION}` is optional. If omitted status for all versions is
-returned in the response.
+Including `/versions/${VERSION}` or `/labels/${LABEL}` is optional. If omitted
+status for all versions is returned in the response.
 
 ### Response format
 
@@ -48,11 +48,11 @@ gRPC API. It returns the metadata of a model in the ModelServer.
 ### URL
 
 ```
-GET http://host:port/v1/models/${MODEL_NAME}[/versions/${MODEL_VERSION}]/metadata
+GET http://host:port/v1/models/${MODEL_NAME}[/versions/${VERSION}|/labels/${LABEL}]/metadata
 ```
 
-`/versions/${MODEL_VERSION}` is optional. If omitted the model metadata for
-the latest version is returned in the response.
+Including `/versions/${VERSION}` or `/labels/${LABEL}` is optional. If omitted
+the model metadata for the latest version is returned in the response.
 
 ### Response format
 
@@ -69,10 +69,11 @@ gRPC API.
 ### URL
 
 ```
-POST http://host:port/v1/models/${MODEL_NAME}[/versions/${MODEL_VERSION}]:(classify|regress)
+POST http://host:port/v1/models/${MODEL_NAME}[/versions/${VERSION}|/labels/${LABEL}]:(classify|regress)
 ```
 
-`/versions/${MODEL_VERSION}` is optional. If omitted the latest version is used.
+Including `/versions/${VERSION}` or `/labels/${LABEL}` is optional. If omitted
+the latest version is used.
 
 ### Request format
 
@@ -111,9 +112,9 @@ formatted as follows:
 }
 ```
 
-`<value>` is a JSON number (whole or decimal) or string, and `<list>` is a list
-of such values. See [Encoding binary values](#encoding-binary-values) section
-below for details on how to represent a binary (stream of bytes) value. This
+`<value>` is a JSON number (whole or decimal), JSON string, or a JSON object
+that represents binary data (see the [Encoding binary values](#encoding-binary-values)
+section below for details). `<list>` is a list of such values. This
 format is similar to gRPC's `ClassificationRequest` and `RegressionRequest`
 protos. Both versions accept list of
 [`Example`](https://github.com/tensorflow/tensorflow/blob/92e6c3e4f5c1cabfda1e61547a6a1b268ef95fa5/tensorflow/core/example/example.proto#L13)
@@ -165,10 +166,11 @@ gRPC API.
 ### URL
 
 ```
-POST http://host:port/v1/models/${MODEL_NAME}[/versions/${MODEL_VERSION}]:predict
+POST http://host:port/v1/models/${MODEL_NAME}[/versions/${VERSION}|/labels/${LABEL}]:predict
 ```
 
-`/versions/${MODEL_VERSION}` is optional. If omitted the latest version is used.
+Including `/versions/${VERSION}` or `/labels/${LABEL}` is optional. If omitted
+the latest version is used.
 
 ### Request format
 

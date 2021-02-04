@@ -47,6 +47,7 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/c/c_api.h"
+#include "tensorflow/compiler/jit/flags.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/util/command_line_flags.h"
@@ -56,9 +57,11 @@ limitations under the License.
 int main(int argc, char** argv) {
   tensorflow::serving::main::Server::Options options;
   bool display_version = false;
+  bool xla_cpu_compilation_enabled = false;
   std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("port", &options.grpc_port,
-                       "Port to listen on for gRPC API"),
+                       "TCP port to listen on for gRPC/HTTP API. Disabled if "
+                       "port set to zero."),
       tensorflow::Flag("grpc_socket_path", &options.grpc_socket_path,
                        "If non-empty, listen to a UNIX socket for gRPC API "
                        "on the given path. Can be either relative or absolute "
@@ -104,6 +107,18 @@ int main(int argc, char** argv) {
       tensorflow::Flag("model_base_path", &options.model_base_path,
                        "path to export (ignored if --model_config_file flag "
                        "is set, otherwise required)"),
+      tensorflow::Flag("num_load_threads", &options.num_load_threads,
+                       "The number of threads in the thread-pool used to load "
+                       "servables. If set as 0, we don't use a thread-pool, "
+                       "and servable loads are performed serially in the "
+                       "manager's main work loop, may casue the Serving "
+                       "request to be delayed. Default: 0"),
+      tensorflow::Flag("num_unload_threads", &options.num_unload_threads,
+                       "The number of threads in the thread-pool used to "
+                       "unload servables. If set as 0, we don't use a "
+                       "thread-pool, and servable loads are performed serially "
+                       "in the manager's main work loop, may casue the Serving "
+                       "request to be delayed. Default: 0"),
       tensorflow::Flag("max_num_load_retries", &options.max_num_load_retries,
                        "maximum number of times it retries loading a model "
                        "after the first failure, before giving up. "
@@ -174,6 +189,8 @@ int main(int argc, char** argv) {
                        "A comma separated list of arguments to be passed to "
                        "the grpc server. (e.g. "
                        "grpc.max_connection_age_ms=2000)"),
+      tensorflow::Flag("grpc_max_threads", &options.grpc_max_threads,
+                       "Max grpc server threads to handle grpc messages."),
       tensorflow::Flag("enable_model_warmup", &options.enable_model_warmup,
                        "Enables model warmup, which triggers lazy "
                        "initializations (such as TF optimizations) at load "
@@ -182,7 +199,36 @@ int main(int argc, char** argv) {
       tensorflow::Flag(
           "monitoring_config_file", &options.monitoring_config_file,
           "If non-empty, read an ascii MonitoringConfig protobuf from "
-          "the supplied file name")};
+          "the supplied file name"),
+      tensorflow::Flag(
+          "remove_unused_fields_from_bundle_metagraph",
+          &options.remove_unused_fields_from_bundle_metagraph,
+          "Removes unused fields from MetaGraphDef proto message to save "
+          "memory."),
+      tensorflow::Flag("prefer_tflite_model", &options.prefer_tflite_model,
+                       "EXPERIMENTAL; CAN BE REMOVED ANYTIME! "
+                       "Prefer TensorFlow Lite model from `model.tflite` file "
+                       "in SavedModel directory, instead of the TensorFlow "
+                       "model from `saved_model.pb` file. "
+                       "If no TensorFlow Lite model found, fallback to "
+                       "TensorFlow model."),
+      tensorflow::Flag(
+          "num_tflite_interpreters", &options.num_tflite_interpreters,
+          "EXPERIMENTAL; CAN BE REMOVED ANYTIME! Number of TFLite interpreters "
+          "in an interpreter pool of TfLiteSession. Typically there is one "
+          "TfLiteSession for each TF Lite model that is loaded. If not "
+          "set, will be auto set based on number of CPUs."),
+      tensorflow::Flag(
+          "enable_signature_method_name_check",
+          &options.enable_signature_method_name_check,
+          "Enable method_name check for SignatureDef. Disable this if serving "
+          "native TF2 regression/classification models."),
+      tensorflow::Flag(
+          "xla_cpu_compilation_enabled", &xla_cpu_compilation_enabled,
+          "EXPERIMENTAL; CAN BE REMOVED ANYTIME! "
+          "Enable XLA:CPU JIT (default is disabled). With XLA:CPU JIT "
+          "disabled, models utilizing this feature will return bad Status "
+          "on first compilation request.")};
 
   const auto& usage = tensorflow::Flags::Usage(argv[0], flag_list);
   if (!tensorflow::Flags::Parse(&argc, argv, flag_list)) {
@@ -199,6 +245,10 @@ int main(int argc, char** argv) {
   tensorflow::port::InitMain(argv[0], &argc, &argv);
   if (argc != 1) {
     std::cout << "unknown argument: " << argv[1] << "\n" << usage;
+  }
+
+  if (!xla_cpu_compilation_enabled) {
+    tensorflow::DisableXlaCompilation();
   }
 
   tensorflow::serving::main::Server server;

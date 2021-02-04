@@ -23,10 +23,12 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/profiler/rpc/profiler_service_impl.h"
 #include "tensorflow_serving/model_servers/http_server.h"
 #include "tensorflow_serving/model_servers/model_service_impl.h"
 #include "tensorflow_serving/model_servers/prediction_service_impl.h"
 #include "tensorflow_serving/model_servers/server_core.h"
+#include "tensorflow_serving/servables/tensorflow/thread_pool_factory.h"
 
 namespace tensorflow {
 namespace serving {
@@ -41,6 +43,7 @@ class Server {
     tensorflow::int32 grpc_port = 8500;
     tensorflow::string grpc_channel_arguments;
     tensorflow::string grpc_socket_path;
+    tensorflow::int32 grpc_max_threads = 4.0 * port::NumSchedulableCPUs();
 
     //
     // HTTP Server options.
@@ -57,6 +60,8 @@ class Server {
     float per_process_gpu_memory_fraction = 0;
     tensorflow::string batching_parameters_file;
     tensorflow::string model_name;
+    tensorflow::int32 num_load_threads = 0;
+    tensorflow::int32 num_unload_threads = 0;
     tensorflow::int32 max_num_load_retries = 5;
     tensorflow::int64 load_retry_interval_micros = 1LL * 60 * 1000 * 1000;
     tensorflow::int32 file_system_poll_wait_seconds = 1;
@@ -81,6 +86,11 @@ class Server {
     tensorflow::string monitoring_config_file;
     // Tensorflow session run options.
     bool enforce_session_run_timeout = true;
+    bool remove_unused_fields_from_bundle_metagraph = true;
+    bool prefer_tflite_model = false;
+    tensorflow::int32 num_tflite_interpreters = port::NumSchedulableCPUs();
+    tensorflow::string thread_pool_factory_config_file;
+    bool enable_signature_method_name_check = false;
 
     Options();
   };
@@ -105,11 +115,13 @@ class Server {
   std::unique_ptr<ServerCore> server_core_;
   std::unique_ptr<ModelServiceImpl> model_service_;
   std::unique_ptr<PredictionServiceImpl> prediction_service_;
+  std::unique_ptr<tensorflow::grpc::ProfilerService::Service> profiler_service_;
   std::unique_ptr<::grpc::Server> grpc_server_;
   std::unique_ptr<net_http::HTTPServerInterface> http_server_;
   // A thread that calls PollFilesystemAndReloadConfig() periodically if
   // fs_model_config_poll_wait_seconds > 0.
   std::unique_ptr<PeriodicFunction> fs_config_polling_thread_;
+  std::unique_ptr<ThreadPoolFactory> thread_pool_factory_;
 };
 
 }  // namespace main

@@ -19,6 +19,15 @@ def serving_proto_library(
     use_grpc_plugin = None
     if cc_grpc_version:
         use_grpc_plugin = True
+
+    # For compatibility with Google-internal naming conventions
+    native.alias(
+        name = name[:-len("_proto")] + "_cc_proto",
+        actual = name,
+        testonly = testonly,
+        visibility = visibility,
+    )
+
     cc_proto_library(
         name = name,
         srcs = srcs,
@@ -46,3 +55,8 @@ def serving_proto_library_py(name, proto_library, srcs = [], deps = [], visibili
         visibility = visibility,
         testonly = testonly,
     )
+
+def serving_tensorflow_proto_dep(dep):
+    """Rename for deps onto tensorflow protos in serving_proto_library targets.
+    """
+    return "{}_cc".format(dep)

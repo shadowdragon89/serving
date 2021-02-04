@@ -19,12 +19,13 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "absl/memory/memory.h"
-#include "tensorflow_serving/util/net_http/client/evhttp_connection.h"
+#include "tensorflow_serving/util/net_http/client/internal/evhttp_connection.h"
 #include "tensorflow_serving/util/net_http/compression/gzip_zlib.h"
 #include "tensorflow_serving/util/net_http/internal/fixed_thread_pool.h"
 #include "tensorflow_serving/util/net_http/server/internal/evhttp_server.h"
 #include "tensorflow_serving/util/net_http/server/public/httpserver.h"
 #include "tensorflow_serving/util/net_http/server/public/httpserver_interface.h"
+#include "tensorflow_serving/util/net_http/server/public/response_code_enum.h"
 #include "tensorflow_serving/util/net_http/server/public/server_request_interface.h"
 
 namespace tensorflow {
@@ -78,11 +79,11 @@ TEST_F(EvHTTPRequestTest, SimpleGETNotFound) {
       EvHTTPConnection::Connect("localhost", server->listen_port());
   ASSERT_TRUE(connection != nullptr);
 
-  ClientRequest request = {"/noop", "GET", {}, nullptr};
+  ClientRequest request = {"/noop", "GET", {}, ""};
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 404);
+  EXPECT_EQ(response.status, HTTPStatusCode::NOT_FOUND);
   EXPECT_FALSE(response.body.empty());
 
   server->Terminate();
@@ -103,11 +104,11 @@ TEST_F(EvHTTPRequestTest, SimpleGETOK) {
       EvHTTPConnection::Connect("localhost", server->listen_port());
   ASSERT_TRUE(connection != nullptr);
 
-  ClientRequest request = {"/ok", "GET", {}, nullptr};
+  ClientRequest request = {"/ok", "GET", {}, ""};
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
   EXPECT_EQ(response.body, "OK");
 
   server->Terminate();
@@ -137,7 +138,7 @@ TEST_F(EvHTTPRequestTest, SimplePOST) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
   EXPECT_EQ(response.body, "abcde");
 
   server->Terminate();
@@ -174,7 +175,7 @@ TEST_F(EvHTTPRequestTest, RequestUri) {
   ASSERT_TRUE(connection != nullptr);
 
   for (const char* path : kUriPath) {
-    ClientRequest request = {path, "GET", {}, nullptr};
+    ClientRequest request = {path, "GET", {}, ""};
     ClientResponse response = {};
 
     EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
@@ -206,11 +207,11 @@ TEST_F(EvHTTPRequestTest, RequestHeaders) {
                            "GET",
                            {ClientRequest::HeaderKeyValue("H1", "v1"),
                             ClientRequest::HeaderKeyValue("H2", "v2")},
-                           nullptr};
+                           ""};
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
   EXPECT_EQ(response.body, "OK");
 
   server->Terminate();
@@ -234,7 +235,7 @@ TEST_F(EvHTTPRequestTest, ResponseHeaders) {
       EvHTTPConnection::Connect("localhost", server->listen_port());
   ASSERT_TRUE(connection != nullptr);
 
-  ClientRequest request = {"/ok", "GET", {}, nullptr};
+  ClientRequest request = {"/ok", "GET", {}, ""};
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
@@ -247,7 +248,7 @@ TEST_F(EvHTTPRequestTest, ResponseHeaders) {
       EXPECT_EQ(keyvalue.second, "v2");
     }
   }
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
   EXPECT_EQ(response.body, "OK");
 
   server->Terminate();
@@ -279,7 +280,7 @@ TEST_F(EvHTTPRequestTest, InvalidGzipPost) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
 
   server->Terminate();
   server->WaitForTermination();
@@ -308,7 +309,7 @@ TEST_F(EvHTTPRequestTest, DisableGzipPost) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
 
   server->Terminate();
   server->WaitForTermination();
@@ -359,7 +360,7 @@ TEST_F(EvHTTPRequestTest, ValidGzipPost) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
 
   server->Terminate();
   server->WaitForTermination();
@@ -396,7 +397,7 @@ TEST_F(EvHTTPRequestTest, GzipExceedingLimit) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
 
   server->Terminate();
   server->WaitForTermination();
@@ -446,7 +447,7 @@ TEST_F(EvHTTPRequestTest, LargeGzipPost) {
   ClientResponse response = {};
 
   EXPECT_TRUE(connection->BlockingSendRequest(request, &response));
-  EXPECT_EQ(response.status, 200);
+  EXPECT_EQ(response.status, HTTPStatusCode::OK);
 
   server->Terminate();
   server->WaitForTermination();

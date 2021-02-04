@@ -29,7 +29,6 @@ limitations under the License.
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow_serving/core/servable_handle.h"
 #include "tensorflow_serving/core/source.h"
-#include "tensorflow_serving/util/cleanup.h"
 #include "tensorflow_serving/util/hash.h"
 #include "tensorflow_serving/util/inline_executor.h"
 #include "tensorflow_serving/util/retrier.h"
@@ -718,21 +717,23 @@ Status BasicManager::ReserveResources(LoaderHarness* harness,
     bool resources_reserved;
     // We retry reserving resources because it may involve transiently failing
     // operations like file-reads.
-    const Status reserve_resources_status =
-        Retry(strings::StrCat("Reserving resources for servable: ",
-                              harness->id().DebugString()),
-              harness_options_.max_num_load_retries,
-              harness_options_.load_retry_interval_micros,
-              [&]() EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-                return resource_tracker_->ReserveResources(*harness->loader(),
-                                                           &resources_reserved);
-              },
-              [&]() { return harness->cancel_load_retry(); });
+    const Status reserve_resources_status = Retry(
+        strings::StrCat("Reserving resources for servable: ",
+                        harness->id().DebugString()),
+        harness_options_.max_num_load_retries,
+        harness_options_.load_retry_interval_micros,
+        [&]() TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+          return resource_tracker_->ReserveResources(*harness->loader(),
+                                                     &resources_reserved);
+        },
+        [&]() { return harness->cancel_load_retry(); });
     if (!reserve_resources_status.ok()) {
-      return errors::Internal(strings::StrCat(
-          "Error while attempting to reserve resources to load servable ",
-          harness->id().DebugString(), ": ",
-          reserve_resources_status.error_message()));
+      return Status(
+          reserve_resources_status.code(),
+          strings::StrCat(
+              "Error while attempting to reserve resources to load servable ",
+              harness->id().DebugString(), ": ",
+              reserve_resources_status.error_message()));
     }
     if (resources_reserved) {
       // Woohoo! We got our resources.

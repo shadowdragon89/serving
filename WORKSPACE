@@ -1,5 +1,10 @@
 workspace(name = "tf_serving")
 
+# ===== TensorFlow dependency =====
+#
+# TensorFlow is imported here instead of in tf_serving_workspace() because
+# existing automation scripts that bump the TF commit hash expect it here.
+#
 # To update TensorFlow to a new revision.
 # 1. Update the 'git_commit' args below to include the new git hash.
 # 2. Get the sha256 hash of the archive with a command such as...
@@ -8,41 +13,37 @@ workspace(name = "tf_serving")
 # 3. Request the new archive to be mirrored on mirror.bazel.build for more
 #    reliable downloads.
 load("//tensorflow_serving:repo.bzl", "tensorflow_http_archive")
-
 tensorflow_http_archive(
     name = "org_tensorflow",
-    sha256 = "0d54f4e83e3e51a21e94f6d1684e610fa2cf2d55e962ad390befdc47db986f70",
-    git_commit = "eec66ce4ca210901267de2b7f491902fa831a69a",
+    sha256 = "b302ff9bbe16cd496bf8501f570076f8faab22ab3bfea5f3a5a2d01eaf7399f0",
+    git_commit = "4f6924d44aa914dbfee79fee8211bdbc25c6e089",
 )
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-# START: Upstream TensorFlow dependencies
-# TensorFlow build depends on these dependencies.
-# Needs to be in-sync with TensorFlow sources.
-http_archive(
-    name = "io_bazel_rules_closure",
-    sha256 = "ddce3b3a3909f99b28b25071c40b7fec7e2e1d1d1a4b2e933f3082aa99517105",
-    strip_prefix = "rules_closure-316e6133888bfc39fb860a4f1a31cfcbae485aef",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_closure/archive/316e6133888bfc39fb860a4f1a31cfcbae485aef.tar.gz",
-        "https://github.com/bazelbuild/rules_closure/archive/316e6133888bfc39fb860a4f1a31cfcbae485aef.tar.gz",  # 2019-03-21
-    ],
-)
-http_archive(
-    name = "bazel_skylib",
-    sha256 = "2c62d8cd4ab1e65c08647eb4afe38f51591f43f7f0885e7769832fa137633dcb",
-    strip_prefix = "bazel-skylib-0.7.0",
-    urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.7.0.tar.gz"],
-)
-# END: Upstream TensorFlow dependencies
-
-# Please add all new TensorFlow Serving dependencies in workspace.bzl.
+# Import all of TensorFlow Serving's external dependencies.
+# Downstream projects (projects importing TensorFlow Serving) need to
+# duplicate all code below in their WORKSPACE file in order to also initialize
+# those external dependencies.
 load("//tensorflow_serving:workspace.bzl", "tf_serving_workspace")
-
 tf_serving_workspace()
 
-# Specify the minimum required bazel version.
-load("@org_tensorflow//tensorflow:version_check.bzl", "check_bazel_version_at_least")
+# Check bazel version requirement, which is stricter than TensorFlow's.
+load(
+    "@org_tensorflow//tensorflow:version_check.bzl",
+    "check_bazel_version_at_least"
+)
+check_bazel_version_at_least("3.0.0")
 
-check_bazel_version_at_least("0.24.1")
+# Initialize TensorFlow's external dependencies.
+load("@org_tensorflow//tensorflow:workspace3.bzl", "workspace")
+workspace()
+load("@org_tensorflow//tensorflow:workspace2.bzl", "workspace")
+workspace()
+load("@org_tensorflow//tensorflow:workspace1.bzl", "workspace")
+workspace()
+load("@org_tensorflow//tensorflow:workspace0.bzl", "workspace")
+workspace()
+
+# Initialize bazel package rules' external dependencies.
+load("@rules_pkg//:deps.bzl", "rules_pkg_dependencies")
+rules_pkg_dependencies()
+

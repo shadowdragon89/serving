@@ -26,15 +26,18 @@ limitations under the License.
 #include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/lib/monitoring/gauge.h"
 #include "tensorflow_serving/core/loader.h"
 #include "tensorflow_serving/core/servable_data.h"
+#include "tensorflow_serving/core/test_util/session_test_util.h"
 #include "tensorflow_serving/resources/resource_util.h"
 #include "tensorflow_serving/resources/resource_values.h"
 #include "tensorflow_serving/resources/resources.pb.h"
 #include "tensorflow_serving/servables/tensorflow/bundle_factory_test_util.h"
+#include "tensorflow_serving/servables/tensorflow/saved_model_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
-#include "tensorflow_serving/servables/tensorflow/session_bundle_source_adapter.pb.h"
 #include "tensorflow_serving/test_util/test_util.h"
+#include "tensorflow_serving/util/oss_or_google.h"
 
 namespace tensorflow {
 namespace serving {
@@ -42,8 +45,10 @@ namespace {
 
 using test_util::EqualsProto;
 
+Loader::Metadata CreateMetadata() { return {ServableId{"name", 42}}; }
+
 class SavedModelBundleSourceAdapterTest
-    : public ::testing::TestWithParam<std::tuple<bool, bool>> {
+    : public ::testing::TestWithParam<std::tuple<bool, bool, bool>> {
  protected:
   SavedModelBundleSourceAdapterTest() {
     ResourceUtil::Options resource_util_options;
@@ -53,13 +58,33 @@ class SavedModelBundleSourceAdapterTest
 
     ram_resource_ = resource_util_->CreateBoundResource(
         device_types::kMain, resource_kinds::kRamBytes);
-    config_.mutable_config()->set_enable_model_warmup(EnableWarmup());
+    config_.mutable_legacy_config()->set_enable_model_warmup(EnableWarmup());
     if (EnableNumRequestIterations()) {
-      config_.mutable_config()
+      config_.mutable_legacy_config()
           ->mutable_model_warmup_options()
           ->mutable_num_request_iterations()
           ->set_value(2);
     }
+
+    config_.mutable_legacy_config()->set_enable_session_metadata(
+        EnableSessionMetadata());
+
+    config_.mutable_legacy_config()->set_session_target(
+        test_util::kNewSessionHookSessionTargetPrefix);
+    test_util::SetNewSessionHook([&](const SessionOptions& session_options) {
+      EXPECT_EQ(EnableSessionMetadata(),
+                session_options.config.experimental().has_session_metadata());
+      if (EnableSessionMetadata()) {
+        const auto& actual_session_metadata =
+            session_options.config.experimental().session_metadata();
+        const auto& expected_loader_metadata = CreateMetadata();
+        EXPECT_EQ(expected_loader_metadata.servable_id.name,
+                  actual_session_metadata.name());
+        EXPECT_EQ(expected_loader_metadata.servable_id.version,
+                  actual_session_metadata.version());
+      }
+      return Status::OK();
+    });
   }
 
   void TestSavedModelBundleSourceAdapter(const string& export_dir) const {
@@ -86,7 +111,8 @@ class SavedModelBundleSourceAdapterTest
     TF_ASSERT_OK(loader->EstimateResources(&second_resource_estimate));
     EXPECT_THAT(second_resource_estimate, EqualsProto(first_resource_estimate));
 
-    TF_ASSERT_OK(loader->Load());
+    const auto metadata = CreateMetadata();
+    TF_ASSERT_OK(loader->LoadWithMetadata(CreateMetadata()));
 
     // We should get a new (lower) resource estimate post-load.
     ResourceAllocation expected_post_load_resource_estimate =
@@ -94,7 +120,8 @@ class SavedModelBundleSourceAdapterTest
     resource_util_->SetQuantity(
         ram_resource_,
         resource_util_->GetQuantity(ram_resource_, first_resource_estimate) -
-            config_.config().experimental_transient_ram_bytes_during_load(),
+            config_.legacy_config()
+                .experimental_transient_ram_bytes_during_load(),
         &expected_post_load_resource_estimate);
     ResourceAllocation actual_post_load_resource_estimate;
     TF_ASSERT_OK(
@@ -108,30 +135,56 @@ class SavedModelBundleSourceAdapterTest
     loader->Unload();
   }
 
-  bool EnableWarmup() { return std::get<0>(GetParam()); }
-  bool EnableNumRequestIterations() { return std::get<1>(GetParam()); }
+  bool EnableWarmup() const { return std::get<0>(GetParam()); }
+  bool EnableNumRequestIterations() const { return std::get<1>(GetParam()); }
+  bool EnableSessionMetadata() const { return std::get<2>(GetParam()); }
 
   std::unique_ptr<ResourceUtil> resource_util_;
   Resource ram_resource_;
-  SessionBundleSourceAdapterConfig config_;
+  SavedModelBundleSourceAdapterConfig config_;
 };
 
 TEST_P(SavedModelBundleSourceAdapterTest, Basic) {
-  config_.mutable_config()->set_experimental_transient_ram_bytes_during_load(
-      42);
+  config_.mutable_legacy_config()
+      ->set_experimental_transient_ram_bytes_during_load(42);
 
   TestSavedModelBundleSourceAdapter(test_util::GetTestSavedModelPath());
 }
 
 TEST_P(SavedModelBundleSourceAdapterTest, BackwardCompatibility) {
+  if (IsTensorflowServingOSS()) {
+    return;
+  }
   TestSavedModelBundleSourceAdapter(
       test_util::GetTestSessionBundleExportPath());
 }
 
+TEST_P(SavedModelBundleSourceAdapterTest, MLMetadata) {
+  if (!EnableSessionMetadata()) return;
+  TestSavedModelBundleSourceAdapter(test_util::TestSrcDirPath(
+      strings::StrCat("/servables/tensorflow/testdata/",
+                      "saved_model_half_plus_two_mlmd/00000123")));
+  auto* collection_registry = monitoring::CollectionRegistry::Default();
+  monitoring::CollectionRegistry::CollectMetricsOptions options;
+  const std::unique_ptr<monitoring::CollectedMetrics> collected_metrics =
+      collection_registry->CollectMetrics(options);
+  const monitoring::PointSet& lps =
+      *collected_metrics->point_set_map.at("/tensorflow/serving/mlmd_map");
+
+  EXPECT_EQ(1, lps.points.size());
+  EXPECT_EQ(2, lps.points[0]->labels.size());
+  EXPECT_EQ("model_name", lps.points[0]->labels[0].name);
+  EXPECT_EQ("name", lps.points[0]->labels[0].value);
+  EXPECT_EQ("version", lps.points[0]->labels[1].name);
+  EXPECT_EQ("42", lps.points[0]->labels[1].value);
+  EXPECT_EQ("test_mlmd_uuid", lps.points[0]->string_value);
+}
+
 // Test all SavedModelBundleSourceAdapterTest test cases with
-// warmup and num_request_iterations enabled/disabled.
-INSTANTIATE_TEST_CASE_P(ModelWarmup, SavedModelBundleSourceAdapterTest,
-                        ::testing::Combine(::testing::Bool(),
+// warmup, num_request_iterations enabled/disabled and session-metadata
+// enabled/disabled.
+INSTANTIATE_TEST_CASE_P(VariousOptions, SavedModelBundleSourceAdapterTest,
+                        ::testing::Combine(::testing::Bool(), ::testing::Bool(),
                                            ::testing::Bool()));
 
 }  // namespace

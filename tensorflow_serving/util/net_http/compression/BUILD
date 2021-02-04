@@ -19,10 +19,11 @@ cc_library(
         "gzip_zlib.h",
     ],
     deps = [
+        "//tensorflow_serving/util/net_http/internal:net_logging",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/strings",
-        "@zlib_archive//:zlib",
+        "@zlib",
     ],
 )
 
